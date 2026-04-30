@@ -1,0 +1,4 @@
+customtkinter
+ollama
+requests
+python-dotenv
