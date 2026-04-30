@@ -11,7 +11,7 @@ Edge-based Eutrophication Detection & Response System. Fog-Computing Swarm Simul
 ## Prerequisites
 - **Python 3.10+**
 - **Ollama**: [Download Ollama](https://ollama.com/)
-  - Pull the default model: `ollama pull gemma4:1b`
+  - Pull the default model: `ollama pull gemma3:1b`
 
 ## Quick Start (Windows)
 

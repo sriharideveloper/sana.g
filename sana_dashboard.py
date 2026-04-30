@@ -37,7 +37,7 @@ except ImportError:
     print("[WARN] `ollama` library not found. Running in fallback mode.")
 
 # ── Model Configuration ──────────────────────────────────────────────────────
-DEFAULT_MODEL = "gemma4:1b"   # Must match an installed model from `ollama list`
+DEFAULT_MODEL = "gemma3:1b"   # Must match an installed model from `ollama list`
 
 def validate_ollama_model(model_name: str) -> bool:
     """
@@ -1124,10 +1124,10 @@ class SANADashboard(ctk.CTk):
             text_color=COLORS["text_normal"],
         ).pack(side="left", padx=(0,4))
 
-        self.model_var = ctk.StringVar(value="gemma4:1b")
+        self.model_var = ctk.StringVar(value="gemma3:1b")
         self.model_menu = ctk.CTkOptionMenu(
             bar,
-            values=["gemma4:1b", "gemma:4b", "llama3", "mistral", "phi3", "llama3.2"],
+            values=["gemma3:1b", "gemma4:1b", "gemma:4b", "llama3", "mistral", "phi3", "llama3.2"],
             variable=self.model_var,
             width=130, height=30,
             font=ctk.CTkFont(family="Courier New", size=10),
