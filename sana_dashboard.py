@@ -49,13 +49,16 @@ def validate_ollama_model(model_name: str) -> bool:
         return False
     try:
         models = ollama_lib.list()
-        installed = [m.model for m in models.models]
-        # Check exact match and tag-less match (e.g. 'gemma4' matches 'gemma4:latest')
-        for installed_name in installed:
-            if model_name == installed_name or model_name == installed_name.split(':')[0]:
+        for m in models.models:
+            installed_name = m.model
+            # Clean up the name (e.g. 'gemma3:1b' or 'gemma3:latest' -> 'gemma3')
+            clean_installed = installed_name.split(':')[0].lower()
+            clean_target = model_name.split(':')[0].lower()
+            
+            if model_name == installed_name or clean_target == clean_installed:
                 print(f"[OK] Model '{model_name}' found as '{installed_name}'")
                 return True
-        print(f"[ERROR] Model '{model_name}' NOT FOUND. Installed models: {installed}")
+        print(f"[ERROR] Model '{model_name}' NOT FOUND. Installed models: {[m.model for m in models.models]}")
         return False
     except Exception as e:
         print(f"[WARN] Could not validate model: {e}")
@@ -703,8 +706,8 @@ class SANADashboard(ctk.CTk):
 
         # ── Window config ─────────────────────────────────────────────────────
         self.title("SANA · Smart Autonomous Natural Agent  |  Eutrophication Monitor v1.0")
-        self.geometry("1440x860")
-        self.minsize(1200, 720)
+        self.geometry("1024x640")
+        self.minsize(900, 500)
         self.configure(fg_color=COLORS["bg_dark"])
 
         ctk.set_appearance_mode("dark")
