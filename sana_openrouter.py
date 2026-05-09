@@ -158,6 +158,10 @@ class NodeState:
         self.risk = "LOW"
         self.trend = "STABLE"
         self.last_action = "IDLE"
+        self.aeration_ticks = 0
+
+    def activate_aeration(self, duration_ticks: int):
+        self.aeration_ticks = duration_ticks
 
 def compute_health(bloom: float) -> float:
     return max(0.0, 100.0 - (bloom * 100.0))
@@ -177,32 +181,20 @@ def compute_trend(current: float, previous: float) -> str:
 #  LORA TELEMETRY ENGINE
 # ═════════════════════════════════════════════════════════════════════════════
 
-def build_lora_payload(sector: SectorState, sim_time: datetime) -> dict:
-    indices  = sector.get_indices()
-    severity = classify_severity(indices)
-    sector.severity = severity
-
+def build_lora_payload(node: NodeState, sim_time: datetime, raw_json: str = "") -> dict:
     return {
-        "node_id":        f"NODE-{sector.node_id:02d}",
+        "node_id":        node.node_id,
         "timestamp":      sim_time.strftime("%H:%M:%S"),
         "date":           sim_time.strftime("%Y-%m-%d"),
-        "severity":       severity,
-        "bloom_level":    round(sector.bloom_level, 3),
-        "aeration_active":sector.aeration_ticks > 0,
+        "severity":       node.risk,
+        "bloom_level":    round(node.bloom_level, 3),
+        "health":         round(node.health, 1),
+        "aeration_active":node.aeration_ticks > 0,
+        "raw":            raw_json,
         "indices": {
-            "NDVI":       {"value": indices["NDVI"],      "status": format_index_status("NDVI",      indices["NDVI"])},
-            "SABI":       {"value": indices["SABI"],      "status": format_index_status("SABI",      indices["SABI"])},
-            "NDWI":       {"value": indices["NDWI"],      "status": format_index_status("NDWI",      indices["NDWI"])},
-            "NDCI":       {"value": indices["NDCI"],      "status": "OK"},
-            "BCI":        {"value": indices["BCI"],       "status": "OK"},
-            "FAI":        {"value": indices["FAI"],       "status": "OK"},
-            "CHL-a":      {"value": indices["CHL-a"],     "unit": "μg/L",  "status": format_index_status("CHL-a",     indices["CHL-a"])},
-            "Turbidity":  {"value": indices["Turbidity"], "unit": "NTU",   "status": format_index_status("Turbidity", indices["Turbidity"])},
-            "Secchi":     {"value": indices["Secchi"],    "unit": "m",     "status": "OK"},
-            "Coverage":   {"value": indices["Coverage"],  "unit": "%",     "status": "OK"},
-            "CYANO-PROXY":{"value": indices["CYANO"],     "unit": "risk%", "status": format_index_status("CYANO",     indices["CYANO"])},
-            "ABI":        {"value": indices["ABI"],       "status": "OK"},
-            "Nutrient":   {"value": indices["Nutrient"],  "status": "OK"},
+            "EXG": {"value": round(node.exg, 3)},
+            "GLI": {"value": round(node.gli, 3)},
+            "BLOOM": {"value": round(node.bloom_level, 3)}
         }
     }
 
@@ -442,8 +434,8 @@ class SimulationEngine:
             time.sleep(0.02)
 
     def _run_ai_analysis(self, payload: dict):
-        node_num = int(payload["node_id"].split("-")[1])
-        sector   = self.sectors[node_num - 1]
+        node_id = payload["node_id"]
+        node    = self.node
 
         self.event_queue.put(
             f"  🤖 SANA-BRAIN → OpenRouter [{self.model_name.split('/')[-1]}] …"
@@ -457,13 +449,13 @@ class SimulationEngine:
 
         action = ai_result.get("action", "IDLE")
         if action == "ACTIVATE_AERATOR":
-            sector.activate_aeration(duration_ticks=6)
+            node.activate_aeration(duration_ticks=6)
             self.event_queue.put(
                 f"  ⚡ AERATOR ACTIVATED  {payload['node_id']}  (6-tick)"
             )
         elif action in ("DEPLOY_CHEMICALS", "CRITICAL_HUMAN_INTERVENTION"):
-            sector.activate_aeration(duration_ticks=10)
-            sector.trend = min(sector.trend, -0.01)
+            node.activate_aeration(duration_ticks=10)
+            self.node.trend = "FALLING"
             self.event_queue.put(
                 f"  ☣  {action}  {payload['node_id']}  [ALERT DISPATCHED]"
             )

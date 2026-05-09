@@ -148,6 +148,10 @@ class NodeState:
         self.health = 100.0
         self.risk = "LOW"
         self.trend = "STABLE"
+        self.aeration_ticks = 0
+
+    def activate_aeration(self, duration_ticks: int):
+        self.aeration_ticks = duration_ticks
 
 def compute_health(bloom: float) -> float:
     return max(0.0, 100.0 - (bloom * 100.0))
@@ -254,21 +258,16 @@ def call_ollama_agent(payload: dict, model: str = DEFAULT_MODEL) -> dict:
         return rule_based_fallback(payload)
 
     try:
-        # Build a compact but information-rich prompt
+        # Build a compact but information-rich prompt using available indices
         key_indices = {
             "node":     payload["node_id"],
             "time":     payload["timestamp"],
             "severity": payload["severity"],
             "bloom%":   payload["bloom_level"],
-            "NDVI":     payload["indices"]["NDVI"]["value"],
-            "SABI":     payload["indices"]["SABI"]["value"],
-            "NDWI":     payload["indices"]["NDWI"]["value"],
-            "CHL-a_ugL":payload["indices"]["CHL-a"]["value"],
-            "Turbidity_NTU": payload["indices"]["Turbidity"]["value"],
-            "Secchi_m": payload["indices"]["Secchi"]["value"],
-            "Coverage%":payload["indices"]["Coverage"]["value"],
-            "CYANO%":   payload["indices"]["CYANO-PROXY"]["value"],
-            "ABI":      payload["indices"]["ABI"]["value"],
+            "health%":  payload["health"],
+            "EXG":      payload["indices"]["EXG"]["value"],
+            "GLI":      payload["indices"]["GLI"]["value"],
+            "trend":    payload["trend"],
         }
 
         user_message = (
@@ -384,7 +383,8 @@ class SimulationEngine:
                 continue
 
             if SPI_AVAILABLE:
-                w(0x01,0x85)
+                # ── REAL LORA RADIO MODE (DITTO RX LOGIC) ──────────────────
+                w(0x01,0x85)   # FORCE RX
                 irq = r(0x12)
 
                 if irq & 0x40:
@@ -443,6 +443,41 @@ class SimulationEngine:
                         ai_t.start()
 
                     init_lora()
+            else:
+                # ── SIMULATED LORA MODE (FOR WINDOWS/TESTING) ─────────────
+                time.sleep(self.tick_interval)
+                
+                # Synthetic data generation logic
+                if self.node.aeration_ticks > 0:
+                    self.node.aeration_ticks -= 1
+                    bloom_change = random.uniform(-0.06, -0.02)
+                else:
+                    bloom_change = random.uniform(-0.02, 0.05)
+
+                bloom = max(0.0, min(1.0, self.node.bloom_level + bloom_change))
+                exg = bloom * 0.8 + random.uniform(-0.02, 0.02)
+                gli = (1.0 - bloom) * 0.6 + random.uniform(-0.02, 0.02)
+                
+                self.node.trend = compute_trend(bloom, self.node.bloom_level)
+                self.node.bloom_level = bloom
+                self.node.exg = exg
+                self.node.gli = gli
+                self.node.health = compute_health(bloom)
+                self.node.risk = risk_level(bloom)
+                
+                self.sim_time += timedelta(minutes=15)
+                self.tick_count += 1
+                
+                raw_sim = json.dumps({"node": "worker_1", "indices": {"BLOOM": round(bloom, 3), "EXG": round(exg, 3), "GLI": round(gli, 3)}})
+                payload = build_lora_payload(self.node, self.sim_time, raw_sim)
+                
+                self.event_queue.put(f"[{self.sim_time.strftime('%H:%M')}] ── SIMULATED PACKET ──")
+                self.telemetry_queue.put(payload)
+                
+                if not self._ai_pending:
+                    self._ai_pending = True
+                    ai_t = threading.Thread(target=self._run_ai_analysis, args=(payload,), daemon=True)
+                    ai_t.start()
 
             time.sleep(0.02)
 
