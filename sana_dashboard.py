@@ -23,8 +23,8 @@ import queue
 import random
 import threading
 import time
-from datetime import datetime, timedelta
-
+import cv2
+from PIL import Image
 try:
     import spidev
     spi = spidev.SpiDev()
@@ -486,41 +486,45 @@ class SimulationEngine:
         Call the Ollama AI controller, parse the response, apply any
         interventions back to the sector state, and push results to ai_queue.
         """
-        node_num = payload["node_id"]
+        node_id = payload["node_id"]
         sector = self.node
 
         self.event_queue.put(
             f"  🤖 SANA-BRAIN analysing {payload['node_id']}..."
         )
 
-        ai_result = call_ollama_agent(payload, model=self.model_name)
+        try:
+            ai_result = call_ollama_agent(payload, model=self.model_name)
 
-        # ── Apply AI action back to the physical sector state ─────────────────
-        action = ai_result.get("action", "IDLE")
-        if action == "ACTIVATE_AERATOR":
-            sector.activate_aeration(duration_ticks=6)
-            self.event_queue.put(
-                f"  ⚡ AERATOR ACTIVATED  {payload['node_id']}  "
-                f"(6-tick intervention)"
-            )
-        elif action in ("DEPLOY_CHEMICALS", "CRITICAL_HUMAN_INTERVENTION"):
-            # Strong chemical intervention: larger bloom reduction
-            sector.activate_aeration(duration_ticks=10)
-            sector.trend = min(sector.trend, -0.01)
-            self.event_queue.put(
-                f"  ☣  {action}  {payload['node_id']}  "
-                f"[ALERT DISPATCHED]"
-            )
+            # ── Apply AI action back to the physical sector state ─────────────────
+            action = ai_result.get("action", "IDLE")
+            if action == "ACTIVATE_AERATOR":
+                sector.activate_aeration(duration_ticks=6)
+                self.event_queue.put(
+                    f"  ⚡ AERATOR ACTIVATED  {payload['node_id']}  "
+                    f"(6-tick intervention)"
+                )
+            elif action in ("DEPLOY_CHEMICALS", "CRITICAL_HUMAN_INTERVENTION"):
+                # Strong chemical intervention: larger bloom reduction
+                sector.activate_aeration(duration_ticks=10)
+                sector.trend = "FALLING"  # Correctly set string trend
+                self.event_queue.put(
+                    f"  ☣  {action}  {payload['node_id']}  "
+                    f"[ALERT DISPATCHED]"
+                )
 
-        # Push result to GUI queue
-        self.ai_queue.put({
-            "node_id":   payload["node_id"],
-            "timestamp": payload["timestamp"],
-            "result":    ai_result,
-            "payload":   payload,
-        })
-
-        self._ai_pending = False
+            # Push result to GUI queue
+            self.ai_queue.put({
+                "node_id":   payload["node_id"],
+                "timestamp": payload["timestamp"],
+                "result":    ai_result,
+                "payload":   payload,
+            })
+        except Exception as e:
+            self.event_queue.put(f"  ⚠ AI THREAD ERROR: {e}")
+            print(f"[ERROR] AI analysis failed: {e}")
+        finally:
+            self._ai_pending = False
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -635,9 +639,11 @@ class SANADashboard(ctk.CTk):
         left_col.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0,4))
         left_col.rowconfigure(0, weight=3)
         left_col.rowconfigure(1, weight=2)
+        left_col.rowconfigure(2, weight=2)  # Added row for Video
 
         self._build_sector_map(left_col)
         self._build_bulletin_board(left_col)
+        self._build_camera_panel(left_col)
 
         # ── CENTRE column ─────────────────────────────────────────────────────
         self._build_telemetry_panel(main)
@@ -1169,6 +1175,69 @@ class SANADashboard(ctk.CTk):
         self._running = False
         self.engine.stop()
         self.after(200, self.destroy)
+
+    # ── CAMERA PANEL ──────────────────────────────────────────────────────────
+
+    def _build_camera_panel(self, parent):
+        """Dedicated panel for the live Node Camera stream."""
+        content = ctk.CTkFrame(parent, fg_color=COLORS["bg_panel"],
+                               corner_radius=6, border_width=1,
+                               border_color=COLORS["border"])
+        content.grid(row=2, column=0, sticky="nsew", padx=(0,0), pady=(0,0))
+
+        title_bar = ctk.CTkFrame(content, fg_color=COLORS["bg_card"],
+                                 corner_radius=0, height=26)
+        title_bar.pack(fill="x", side="top")
+        title_bar.pack_propagate(False)
+        ctk.CTkLabel(
+            title_bar,
+            text="  📸 LIVE NODE CAMERA  ·  STREAM #01",
+            font=ctk.CTkFont(family="Courier New", size=10, weight="bold"),
+            text_color=COLORS["cyan_dim"], anchor="w",
+        ).pack(side="left", fill="y")
+
+        self.cam_label = ctk.CTkLabel(content, text="INITIALIZING STREAM...",
+                                      font=ctk.CTkFont(family="Courier New", size=10),
+                                      text_color=COLORS["text_dim"])
+        self.cam_label.pack(fill="both", expand=True, padx=4, pady=4)
+
+        # Start the video thread
+        self.video_url = "http://192.168.1.5:5000/video"
+        self.video_thread = threading.Thread(target=self._video_worker, daemon=True)
+        self.video_thread.start()
+
+    def _video_worker(self):
+        """Background worker to fetch frames from the MJPEG stream."""
+        while True:
+            cap = cv2.VideoCapture(self.video_url)
+            if not cap.isOpened():
+                self.after(0, lambda: self.cam_label.configure(text="STREAM OFFLINE (RECONNECTING...)"))
+                time.sleep(5)
+                continue
+
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                # Resize and convert to PIL for CTk
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(frame)
+                
+                # Simple aspect ratio maintenance (approx 320x180)
+                img = img.resize((320, 180), Image.Resampling.LANCZOS)
+                
+                ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(320, 180))
+                
+                # Update UI in main thread
+                self.after(0, lambda i=ctk_img: self.cam_label.configure(image=i, text=""))
+                
+                # Cap at ~20 FPS to avoid overloading GUI
+                time.sleep(0.05)
+
+            cap.release()
+            self.after(0, lambda: self.cam_label.configure(image=None, text="STREAM INTERRUPTED"))
+            time.sleep(2)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
