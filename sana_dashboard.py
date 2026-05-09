@@ -17,6 +17,7 @@ USAGE:
 """
 
 # ── Standard library ──────────────────────────────────────────────────────────
+import os
 import json
 import math
 import queue
@@ -26,6 +27,9 @@ import time
 from datetime import datetime, timedelta
 import cv2
 from PIL import Image
+
+# Silence OpenCV spam
+os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 try:
     import spidev
     spi = spidev.SpiDev()
@@ -444,6 +448,9 @@ class SimulationEngine:
                         ai_t.start()
 
                     init_lora()
+                else:
+                    # Small breath to avoid CPU maxing when no packet is ready
+                    time.sleep(0.1)
             else:
                 # ── SIMULATED LORA MODE (FOR WINDOWS/TESTING) ─────────────
                 time.sleep(self.tick_interval)
