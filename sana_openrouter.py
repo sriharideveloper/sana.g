@@ -40,6 +40,35 @@ import threading
 import time
 from datetime import datetime, timedelta
 
+try:
+    import spidev
+    spi = spidev.SpiDev()
+    spi.open(0, 0)
+    spi.max_speed_hz = 2000000
+    spi.mode = 0
+    SPI_AVAILABLE = True
+except Exception as e:
+    print(f"[WARN] SPI/LoRa not available: {e}")
+    SPI_AVAILABLE = False
+
+def w(r,v):
+    if SPI_AVAILABLE: spi.xfer2([r|0x80,v])
+def r(r):
+    if SPI_AVAILABLE: return spi.xfer2([r&0x7F,0])[1]
+    return 0
+def b(r,n):
+    if SPI_AVAILABLE: return spi.xfer2([r&0x7F]+[0]*n)[1:]
+    return [0]*n
+
+def init_lora():
+    if not SPI_AVAILABLE: return
+    w(0x01,0x00); time.sleep(0.01)
+    w(0x01,0x80); time.sleep(0.01)
+    w(0x06,0x6C); w(0x07,0x80); w(0x08,0x00)
+    w(0x09,0x8F); w(0x1D,0x72); w(0x1E,0x74)
+    w(0x33,0x27); w(0x3B,0x1D)
+    w(0x0E,0x00); w(0x0F,0x00)
+
 # ── Third-party ───────────────────────────────────────────────────────────────
 
 import customtkinter as ctk
@@ -355,68 +384,7 @@ def call_openrouter_agent(payload: dict, api_key: str,
         "node":          payload["node_id"],
         "time":          payload["timestamp"],
         "severity":      payload["severity"],
-        "bloom_fraction":payload["bloom_level"],
-        "NDVI":          idx["NDVI"]["value"],
-        "SABI":          idx["SABI"]["value"],
-        "NDWI":          idx["NDWI"]["value"],
-        "CHL-a_ugL":     idx["CHL-a"]["value"],
-        "Turbidity_NTU": idx["Turbidity"]["value"],
-        "Secchi_m":      idx["Secchi"]["value"],
-        "Coverage_pct":  idx["Coverage"]["value"],
-        "CYANO_risk_pct":idx["CYANO-PROXY"]["value"],
-        "ABI":           idx["ABI"]["value"],
-    }
-
-    user_message = (
-        f"Telemetry received from {key_data['node']} at {key_data['time']}:\n"
-        f"{json.dumps(key_data, indent=2)}\n\n"
-        "Analyse this data and provide your JSON response."
-    )
-
-    # ── POST to OpenRouter ────────────────────────────────────────────────────
-    headers = {
-        "Authorization":  f"Bearer {api_key.strip()}",
-        "Content-Type":   "application/json",
-        "HTTP-Referer":   OPENROUTER_REFERRER,   # optional: appears on leaderboard
-        "X-Title":        OPENROUTER_APP_NAME,
-    }
-
-    body = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": SANA_SYSTEM_PROMPT},
-            {"role": "user",   "content": user_message},
-        ],
-        "temperature": 0.2,
-        "max_tokens":  512,
-    }
-
-    try:
-        response = req_lib.post(
-            OPENROUTER_BASE_URL,
-            headers=headers,
-            json=body,
-            timeout=30,    # seconds — free tier can be slow under load
-        )
-
-        # ── HTTP error check ──────────────────────────────────────────────────
-        if response.status_code == 401:
-            return rule_based_fallback(payload, "invalid API key (401)")
-        if response.status_code == 429:
-            return rule_based_fallback(payload, "rate limited (429) — slow down tick speed")
-        if response.status_code != 200:
-            return rule_based_fallback(payload, f"HTTP {response.status_code}")
-
-        data     = response.json()
-        raw_text = data["choices"][0]["message"]["content"].strip()
-
-        # ── Strip markdown code fences if the model added them ───────────────
-        if "```" in raw_text:
-            start    = raw_text.find("{")
-            end      = raw_text.rfind("}") + 1
-            raw_text = raw_text[start:end] if start != -1 else raw_text
-
-        parsed = json.loads(raw_text)
+          parsed = json.loads(raw_text)
 
         # Validate required keys
         for key in ("reasoning", "action", "severity", "bulletin"):
@@ -488,48 +456,85 @@ class SimulationEngine:
         self.tick_interval = max(1.0, float(interval_seconds))
 
     def _run_loop(self):
+        self.event_queue.put("[RX] LORA RADIO LISTENING...")
+        if SPI_AVAILABLE:
+            init_lora()
+            
         while self._running:
             if self._paused:
                 time.sleep(0.2)
                 continue
 
-            self.sim_time   += timedelta(minutes=15)
-            self.tick_count += 1
+            if SPI_AVAILABLE:
+                w(0x01,0x85)
+                irq = r(0x12)
 
-            self.event_queue.put(
-                f"[{self.sim_time.strftime('%H:%M')}] ── TICK {self.tick_count:04d} ──"
-            )
+                if irq & 0x40:
+                    length = r(0x13)
+                    fifo = r(0x10)
 
-            payloads = []
-            for sector in self.sectors:
-                sector.tick()
-                payload = build_lora_payload(sector, self.sim_time)
-                payloads.append(payload)
-                self.event_queue.put(
-                    f"  ↗ LoRa RX  NODE-{sector.node_id:02d} → QUEEN  "
-                    f"[bloom={sector.bloom_level:.2f}  sev={sector.severity}]"
-                )
-                self.telemetry_queue.put(payload)
-                time.sleep(0.12)
+                    w(0x0D,fifo)
+                    data = b(0x00,length)
 
-            # Send worst sector for AI analysis
-            worst = max(payloads, key=lambda p: (
-                {"LOW":0,"MODERATE":1,"HIGH":2,"CRITICAL":3}[p["severity"]]
-            ))
+                    w(0x12,0xFF)
 
-            if not self._ai_pending:
-                self._ai_pending = True
-                threading.Thread(
-                    target=self._run_ai_analysis,
-                    args=(worst,),
-                    daemon=True
-                ).start()
+                    text = bytes(data).decode(errors="ignore")
 
-            # Sleep until next tick
-            elapsed = 0
-            while elapsed < self.tick_interval and self._running and not self._paused:
-                time.sleep(0.1)
-                elapsed += 0.1
+                    try:
+                        obj = json.loads(text)
+                        bloom = float(obj.get("indices",{}).get("BLOOM",0))
+                        node = obj.get("node","unknown")
+                    except:
+                        bloom = 0
+                        node = "unknown"
+                        obj = {}
+
+                    node_num = 1
+                    try:
+                        if "NODE-" in node:
+                            node_num = int(node.split("-")[1])
+                    except:
+                        pass
+                    if not (1 <= node_num <= 4):
+                        node_num = 1
+
+                    sector = self.sectors[node_num - 1]
+                    
+                    # Align simulation physics with new telemetry data
+                    sector.bloom_level = bloom
+                    
+                    self.sim_time += timedelta(minutes=15)
+                    self.tick_count += 1
+
+                    self.event_queue.put(
+                        f"[{self.sim_time.strftime('%H:%M')}] ── LORA PACKET ──"
+                        f" {'🔴' if bloom>0.7 else '🟢'}"
+                    )
+                    
+                    payload = build_lora_payload(sector, self.sim_time)
+                    payload["node_id"] = node
+                    if obj.get("raw"):
+                        payload["raw"] = obj.get("raw")
+
+                    self.event_queue.put(
+                        f"  ↗ LoRa RX  {node} → QUEEN  "
+                        f"[bloom={sector.bloom_level:.2f}  sev={sector.severity}]"
+                    )
+                    self.telemetry_queue.put(payload)
+
+                    if not self._ai_pending:
+                        self._ai_pending = True
+                        threading.Thread(
+                            target=self._run_ai_analysis,
+                            args=(payload,),
+                            daemon=True
+                        ).start()
+
+                    init_lora()
+            else:
+                pass
+
+            time.sleep(0.02)
 
     def _run_ai_analysis(self, payload: dict):
         node_num = int(payload["node_id"].split("-")[1])

@@ -25,6 +25,35 @@ import threading
 import time
 from datetime import datetime, timedelta
 
+try:
+    import spidev
+    spi = spidev.SpiDev()
+    spi.open(0, 0)
+    spi.max_speed_hz = 2000000
+    spi.mode = 0
+    SPI_AVAILABLE = True
+except Exception as e:
+    print(f"[WARN] SPI/LoRa not available: {e}")
+    SPI_AVAILABLE = False
+
+def w(r,v):
+    if SPI_AVAILABLE: spi.xfer2([r|0x80,v])
+def r(r):
+    if SPI_AVAILABLE: return spi.xfer2([r&0x7F,0])[1]
+    return 0
+def b(r,n):
+    if SPI_AVAILABLE: return spi.xfer2([r&0x7F]+[0]*n)[1:]
+    return [0]*n
+
+def init_lora():
+    if not SPI_AVAILABLE: return
+    w(0x01,0x00); time.sleep(0.01)
+    w(0x01,0x80); time.sleep(0.01)
+    w(0x06,0x6C); w(0x07,0x80); w(0x08,0x00)
+    w(0x09,0x8F); w(0x1D,0x72); w(0x1E,0x74)
+    w(0x33,0x27); w(0x3B,0x1D)
+    w(0x0E,0x00); w(0x0F,0x00)
+
 # ── Third-party ───────────────────────────────────────────────────────────────
 import customtkinter as ctk
 
@@ -576,66 +605,89 @@ class SimulationEngine:
     def _run_loop(self):
         """
         Main simulation loop — runs in a daemon thread.
-
-        Each iteration:
-          1. Advance all sector states by one tick
-          2. Generate LoRa payloads for every sector
-          3. Push payloads to telemetry_queue
-          4. Pick the highest-severity sector for AI analysis
-          5. Spawn AI inference in a separate thread
-          6. Sleep for tick_interval seconds
+        Reads real LoRa telemetry data via SPI and feeds it into the system.
         """
+        self.event_queue.put("[RX] LORA RADIO LISTENING...")
+        if SPI_AVAILABLE:
+            init_lora()
+            
         while self._running:
             if self._paused:
                 time.sleep(0.2)
                 continue
 
-            # ── Advance time ─────────────────────────────────────────────────
-            self.sim_time  += timedelta(minutes=15)
-            self.tick_count += 1
+            if SPI_AVAILABLE:
+                w(0x01,0x85)
+                irq = r(0x12)
 
-            self.event_queue.put(
-                f"[{self.sim_time.strftime('%H:%M')}] ── TICK {self.tick_count:04d} ──"
-                f" {'🔴' if any(s.bloom_level>0.7 for s in self.sectors) else '🟢'}"
-            )
+                if irq & 0x40:
+                    length = r(0x13)
+                    fifo = r(0x10)
 
-            # ── Advance all sectors ───────────────────────────────────────────
-            payloads = []
-            for sector in self.sectors:
-                sector.tick()
-                payload = build_lora_payload(sector, self.sim_time)
-                payloads.append(payload)
+                    w(0x0D,fifo)
+                    data = b(0x00,length)
 
-                # LoRa transmission event
-                self.event_queue.put(
-                    f"  ↗ LoRa RX  NODE-{sector.node_id:02d} → QUEEN  "
-                    f"[bloom={sector.bloom_level:.2f}  sev={sector.severity}]"
-                )
-                self.telemetry_queue.put(payload)
+                    w(0x12,0xFF)
 
-                # Short stagger between node transmissions (simulates LoRa timing)
-                time.sleep(0.12)
+                    text = bytes(data).decode(errors="ignore")
 
-            # ── Select most critical sector for AI deep-analysis ──────────────
-            worst = max(payloads, key=lambda p: (
-                {"LOW":0,"MODERATE":1,"HIGH":2,"CRITICAL":3}[p["severity"]]
-            ))
+                    try:
+                        obj = json.loads(text)
+                        bloom = float(obj.get("indices",{}).get("BLOOM",0))
+                        node = obj.get("node","unknown")
+                    except:
+                        bloom = 0
+                        node = "unknown"
+                        obj = {}
 
-            # Run AI inference in a separate thread to avoid blocking sim loop
-            if not self._ai_pending:
-                self._ai_pending = True
-                ai_t = threading.Thread(
-                    target=self._run_ai_analysis,
-                    args=(worst,),
-                    daemon=True
-                )
-                ai_t.start()
+                    node_num = 1
+                    try:
+                        if "NODE-" in node:
+                            node_num = int(node.split("-")[1])
+                    except:
+                        pass
+                    if not (1 <= node_num <= 4):
+                        node_num = 1
 
-            # ── Sleep until next tick ─────────────────────────────────────────
-            elapsed = 0
-            while elapsed < self.tick_interval and self._running and not self._paused:
-                time.sleep(0.1)
-                elapsed += 0.1
+                    sector = self.sectors[node_num - 1]
+                    
+                    # Align simulation physics with new telemetry data
+                    sector.bloom_level = bloom
+                    
+                    self.sim_time += timedelta(minutes=15)
+                    self.tick_count += 1
+
+                    self.event_queue.put(
+                        f"[{self.sim_time.strftime('%H:%M')}] ── LORA PACKET ──"
+                        f" {'🔴' if bloom>0.7 else '🟢'}"
+                    )
+                    
+                    payload = build_lora_payload(sector, self.sim_time)
+                    payload["node_id"] = node
+                    if obj.get("raw"):
+                        payload["raw"] = obj.get("raw")
+
+                    self.event_queue.put(
+                        f"  ↗ LoRa RX  {node} → QUEEN  "
+                        f"[bloom={sector.bloom_level:.2f}  sev={sector.severity}]"
+                    )
+                    self.telemetry_queue.put(payload)
+
+                    if not self._ai_pending:
+                        self._ai_pending = True
+                        ai_t = threading.Thread(
+                            target=self._run_ai_analysis,
+                            args=(payload,),
+                            daemon=True
+                        )
+                        ai_t.start()
+
+                    init_lora()
+            else:
+                # Idle when SPI is not available (e.g. testing on PC)
+                pass
+
+            time.sleep(0.02)
 
     def _run_ai_analysis(self, payload: dict):
         """
