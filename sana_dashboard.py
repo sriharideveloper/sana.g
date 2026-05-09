@@ -136,224 +136,54 @@ SEVERITY_COLORS = {
 #  SECTOR PHYSICS ENGINE  (Simulated Environmental State)
 # ═════════════════════════════════════════════════════════════════════════════
 
-class SectorState:
+class NodeState:
     """
-    Holds the living environmental state for one water sector.
-
-    Physics model:
-    ─────────────
-    Each sector has a `bloom_level` (0.0–1.0) that acts as the master driver.
-    All spectral indices are derived as noisy functions of bloom_level, mimicking
-    how real multispectral satellite/drone sensors respond to eutrophication:
-
-      • NDVI  ↑ with bloom (floating vegetation reflects NIR)
-      • SABI  ↑ with bloom (surface algae index)
-      • NDWI  ↓ with bloom (water reflectance drops under mats)
-      • NDCI  ↑ with bloom (chlorophyll difference)
-      • BCI   ↑ with bloom (blue-green cyanobacteria)
-      • FAI   ↑ with bloom (floating algae)
-      • CHL-a ↑ with bloom (μg/L, exponential at high bloom)
-      • Turbidity ↑ with bloom (NTU)
-      • Secchi ↓ with bloom (visibility depth drops)
-      • Coverage ↑ with bloom (% surface covered)
-      • Cyano-Proxy ↑ with bloom (cyanotoxin risk proxy)
-      • ABI   ↑ with bloom (Algal Bloom Index)
-      • Nutrient ↑ with bloom (nitrogen / phosphorus proxy)
+    Holds the living environmental state for the single LoRa worker node.
     """
+    def __init__(self, node_id: str):
+        self.node_id = node_id
+        self.bloom_level = 0.0
+        self.exg = 0.0
+        self.gli = 0.0
+        self.health = 100.0
+        self.risk = "LOW"
+        self.trend = "STABLE"
 
-    def __init__(self, node_id: int, initial_bloom: float, trend: float):
-        self.node_id      = node_id
-        self.bloom_level  = initial_bloom   # 0.0 → pristine, 1.0 → toxic bloom
-        self.trend        = trend           # rate of change per tick (can be negative)
-        self.aeration_ticks = 0             # how many more ticks of aeration remain
-        self.severity     = "LOW"
-        self.last_action  = "IDLE"
+def compute_health(bloom: float) -> float:
+    return max(0.0, 100.0 - (bloom * 100.0))
 
-    def _noise(self, scale: float = 0.01) -> float:
-        """Gaussian noise injection for sensor realism."""
-        return random.gauss(0, scale)
+def risk_level(bloom: float) -> str:
+    if bloom < 0.2: return "LOW"
+    elif bloom < 0.5: return "MODERATE"
+    elif bloom < 0.8: return "HIGH"
+    return "CRITICAL"
 
-    def tick(self):
-        """
-        Advance the sector by one simulated 15-minute interval.
-
-        If an aerator is running, it fights the trend and reduces bloom
-        faster than natural decay, simulating dissolved-oxygen injection
-        disrupting stratification and cyanobacterial buoyancy.
-        """
-        if self.aeration_ticks > 0:
-            # Aeration effect: suppresses bloom growth, actively reduces bloom
-            effective_trend = self.trend - 0.04   # aerators counter growth
-            self.bloom_level = max(0.0, self.bloom_level + effective_trend)
-            self.aeration_ticks -= 1
-        else:
-            # Natural drift: bloom grows or decays following its trend
-            self.bloom_level = max(0.0, min(1.0, self.bloom_level + self.trend))
-
-        # Slow natural recovery after bloom peaks — logistic-like brake
-        if self.bloom_level > 0.85:
-            self.trend = max(self.trend - 0.002, -0.005)  # slow at ceiling
-
-        # Small random climatic variation each tick
-        self.trend += random.gauss(0, 0.001)
-        self.trend  = max(-0.02, min(0.03, self.trend))   # clamp trend
-
-    def activate_aeration(self, duration_ticks: int = 6):
-        """Trigger aerator; effect lasts `duration_ticks` simulation steps."""
-        self.aeration_ticks = duration_ticks
-        self.last_action    = "ACTIVATE_AERATOR"
-
-    def get_indices(self) -> dict:
-        """
-        Derive all spectral and chemical indices from the current bloom_level.
-        Each formula is a calibrated transfer function with sensor noise.
-        """
-        b = self.bloom_level  # shorthand
-
-        # ── Spectral Indices ─────────────────────────────────────────────────
-
-        # NDVI: Normalized Difference Vegetation Index
-        # Water → ~0.0, dense algae → ~0.7
-        ndvi = 0.05 + b * 0.65 + self._noise(0.015)
-
-        # SABI: Surface Algal Bloom Index
-        # Pristine → slightly negative, bloom → positive/high
-        sabi = -0.1 + b * 1.1 + self._noise(0.02)
-
-        # NDWI: Normalized Difference Water Index
-        # Clean water → positive, covered → negative
-        ndwi = 0.3 - b * 0.7 + self._noise(0.015)
-
-        # NDCI: Normalized Difference Chlorophyll Index
-        ndci = -0.05 + b * 0.85 + self._noise(0.02)
-
-        # BCI: Blue-Cyanobacterial Index
-        bci = 0.0 + b * 0.9 + self._noise(0.025)
-
-        # FAI: Floating Algae Index
-        fai = -0.02 + b * 0.55 + self._noise(0.01)
-
-        # ── Chemical / Biological Parameters ─────────────────────────────────
-
-        # CHL-a: Chlorophyll-a concentration (μg/L)
-        # Exponential relationship to bloom intensity
-        chla = 2.0 + math.exp(b * 4.6) * 1.5 + random.gauss(0, 2.0)
-        chla = max(1.0, chla)
-
-        # Turbidity (NTU): increases with bloom density
-        turbidity = 1.5 + b * 48.5 + random.gauss(0, 1.5)
-        turbidity = max(0.5, turbidity)
-
-        # Secchi Depth (m): transparency decreases with bloom
-        secchi = 4.5 - b * 4.0 + self._noise(0.1)
-        secchi = max(0.2, secchi)
-
-        # Coverage (%): surface covered by algal mats
-        coverage = b * 100.0 + random.gauss(0, 2.0)
-        coverage = max(0.0, min(100.0, coverage))
-
-        # Cyano-Proxy: cyanobacterial bloom risk (0–100)
-        cyano = max(0, min(100, b * 110 + random.gauss(0, 3)))
-
-        # ABI: Algal Bloom Index composite
-        abi = max(0, b * 0.95 + self._noise(0.02))
-
-        # Nutrient Index: proxy for nitrogen + phosphorus load
-        nutrient = 0.1 + b * 0.9 + self._noise(0.02)
-
-        return {
-            "NDVI":     round(ndvi,      3),
-            "SABI":     round(sabi,      3),
-            "NDWI":     round(ndwi,      3),
-            "NDCI":     round(ndci,      3),
-            "BCI":      round(bci,       3),
-            "FAI":      round(fai,       3),
-            "CHL-a":    round(chla,      2),
-            "Turbidity":round(turbidity, 2),
-            "Secchi":   round(secchi,    2),
-            "Coverage": round(coverage,  1),
-            "CYANO":    round(cyano,     1),
-            "ABI":      round(abi,       3),
-            "Nutrient": round(nutrient,  3),
-        }
-
-
-def classify_severity(indices: dict) -> str:
-    """
-    Determine sector severity level from spectral/chemical indices.
-
-    Thresholds based on WHO / EPA eutrophication guidelines:
-      CHL-a: LOW<10, MODERATE<25, HIGH<50, CRITICAL≥50 μg/L
-      CYANO: risk proxy amplifies severity
-    """
-    chla  = indices["CHL-a"]
-    cyano = indices["CYANO"]
-    sabi  = indices["SABI"]
-
-    if chla >= 50 or cyano >= 80 or sabi >= 0.7:
-        return "CRITICAL"
-    elif chla >= 25 or cyano >= 50 or sabi >= 0.45:
-        return "HIGH"
-    elif chla >= 10 or cyano >= 20 or sabi >= 0.2:
-        return "MODERATE"
-    else:
-        return "LOW"
-
-
-def format_index_status(key: str, value: float) -> str:
-    """Return a concise human-readable status label for a given index value."""
-    thresholds = {
-        "NDVI":      [(0.1, "CLEAR"), (0.3, "SPARSE VEG"), (0.5, "ACTIVE VEG"), (1.0, "DENSE MAT")],
-        "SABI":      [(-0.05,"CLEAN"), (0.2, "EARLY BLOOM"), (0.5, "SURFACE BLOOM"), (1.0, "SEVERE BLOOM")],
-        "NDWI":      [(-0.5,"COVERED"), (0.0, "TURBID"), (0.2, "MIXED"), (1.0, "CLEAR WATER")],
-        "CYANO":     [(20, "SAFE"), (50, "CAUTION"), (80, "TOXIC"), (100, "EXTREME TOXIC")],
-        "CHL-a":     [(10, "NORMAL"), (25, "ELEVATED"), (50, "HIGH"), (200, "CRITICAL")],
-        "Turbidity": [(5, "CLEAR"), (15, "MODERATE"), (30, "TURBID"), (100, "OPAQUE")],
-    }
-    if key not in thresholds:
-        return "OK" if value < 0.5 else "ELEVATED"
-    for threshold, label in thresholds[key]:
-        if value <= threshold:
-            return label
-    return thresholds[key][-1][1]
-
+def compute_trend(current: float, previous: float) -> str:
+    if current > previous + 0.02: return "RISING"
+    if current < previous - 0.02: return "FALLING"
+    return "STABLE"
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  LORA TELEMETRY ENGINE
 # ═════════════════════════════════════════════════════════════════════════════
 
-def build_lora_payload(sector: SectorState, sim_time: datetime) -> dict:
+def build_lora_payload(node: NodeState, sim_time: datetime, raw_json: str = "") -> dict:
     """
-    Build the JSON payload a Worker Node would transmit via LoRa radio.
-
-    In a real deployment each node compresses this to ~256 bytes
-    at 125kHz bandwidth, SF=10, for ~1.5km range over water.
+    Build the JSON payload containing purely OG LoRa data for the UI and AI.
     """
-    indices = sector.get_indices()
-    severity = classify_severity(indices)
-    sector.severity = severity
-
     payload = {
-        "node_id":   f"NODE-{sector.node_id:02d}",
+        "node_id":   node.node_id,
         "timestamp": sim_time.strftime("%H:%M:%S"),
         "date":      sim_time.strftime("%Y-%m-%d"),
-        "severity":  severity,
-        "bloom_level": round(sector.bloom_level, 3),
-        "aeration_active": sector.aeration_ticks > 0,
+        "severity":  node.risk,
+        "bloom_level": round(node.bloom_level, 3),
+        "health":    round(node.health, 1),
+        "trend":     node.trend,
+        "raw":       raw_json,
         "indices": {
-            "NDVI":    {"value": indices["NDVI"],     "status": format_index_status("NDVI", indices["NDVI"])},
-            "SABI":    {"value": indices["SABI"],     "status": format_index_status("SABI", indices["SABI"])},
-            "NDWI":    {"value": indices["NDWI"],     "status": format_index_status("NDWI", indices["NDWI"])},
-            "NDCI":    {"value": indices["NDCI"],     "status": "OK"},
-            "BCI":     {"value": indices["BCI"],      "status": "OK"},
-            "FAI":     {"value": indices["FAI"],      "status": "OK"},
-            "CHL-a":   {"value": indices["CHL-a"],    "unit": "μg/L",  "status": format_index_status("CHL-a", indices["CHL-a"])},
-            "Turbidity":{"value": indices["Turbidity"],"unit":"NTU",   "status": format_index_status("Turbidity", indices["Turbidity"])},
-            "Secchi":  {"value": indices["Secchi"],   "unit": "m",     "status": "OK"},
-            "Coverage":{"value": indices["Coverage"], "unit": "%",     "status": "OK"},
-            "CYANO-PROXY":{"value": indices["CYANO"],"unit":"risk%", "status": format_index_status("CYANO", indices["CYANO"])},
-            "ABI":     {"value": indices["ABI"],      "status": "OK"},
-            "Nutrient":{"value": indices["Nutrient"], "status": "OK"},
+            "EXG": {"value": round(node.exg, 3)},
+            "GLI": {"value": round(node.gli, 3)},
+            "BLOOM": {"value": round(node.bloom_level, 3)}
         }
     }
     return payload
@@ -365,7 +195,7 @@ def build_lora_payload(sector: SectorState, sim_time: datetime) -> dict:
 
 SANA_SYSTEM_PROMPT = """You are SANA-BRAIN, the agentic AI controller of the SANA (Smart Autonomous Natural Agent) environmental monitoring network deployed on a freshwater lake.
 
-You receive real-time telemetry from autonomous surface nodes measuring eutrophication and algal bloom conditions.
+You receive real-time telemetry from an autonomous surface node measuring eutrophication via EXG and GLI indices.
 
 Your job is to:
 1. Analyze the incoming telemetry data
@@ -394,53 +224,30 @@ Respond ONLY with the JSON object."""
 def call_ollama_agent(payload: dict, model: str = DEFAULT_MODEL) -> dict:
     """
     Send telemetry payload to the local Ollama LLM and parse the response.
-
-    Threading contract: this function is ALWAYS called from a worker thread,
-    never from the GUI thread, to avoid blocking the event loop.
-
-    Returns a dict with keys: reasoning, action, severity, bulletin
-    Falls back to a rule-based response if Ollama is unavailable.
     """
-    # ── Fallback: rule-based response if ollama not available ─────────────────
     def rule_based_fallback(payload: dict) -> dict:
-        """
-        Deterministic fallback controller when the LLM is unreachable.
-        Mirrors the logic the LLM would ideally apply.
-        """
         severity = payload.get("severity", "LOW")
         node     = payload["node_id"]
-        chla     = payload["indices"]["CHL-a"]["value"]
-        cyano    = payload["indices"]["CYANO-PROXY"]["value"]
-        sabi     = payload["indices"]["SABI"]["value"]
+        bloom    = payload["bloom_level"]
 
         if severity == "CRITICAL":
             action  = "CRITICAL_HUMAN_INTERVENTION"
-            bulletin = (f"⚠ CRITICAL ALERT: {node} reports toxic bloom. "
-                        f"CHL-a={chla}μg/L. Avoid all water contact. "
-                        f"Emergency services notified. [FALLBACK MODE]")
-            reason = (f"CHL-a at {chla}μg/L and CYANO-PROXY at {cyano}% exceed WHO toxic thresholds. "
-                      f"SABI={sabi} confirms surface bloom. Immediate human intervention required.")
+            bulletin = f"⚠ CRITICAL ALERT: {node} reports toxic bloom (BLOOM={bloom}). Avoid all water contact. Emergency services notified."
+            reason = f"BLOOM level {bloom} exceeds critical thresholds. Immediate human intervention required."
         elif severity == "HIGH":
             action  = "DEPLOY_CHEMICALS"
-            bulletin = (f"HIGH ALERT: {node} — elevated algal activity detected. "
-                        f"Algaecide deployment authorized. Recreational use suspended. [FALLBACK MODE]")
-            reason = (f"SABI={sabi} and CHL-a={chla}μg/L indicate active bloom. "
-                      f"Cyanobacterial risk elevated. Chemical intervention warranted.")
+            bulletin = f"HIGH ALERT: {node} — elevated algal activity detected (BLOOM={bloom}). Algaecide deployment authorized."
+            reason = f"BLOOM level {bloom} indicates active bloom. Chemical intervention warranted."
         elif severity == "MODERATE":
             action  = "ACTIVATE_AERATOR"
-            bulletin = (f"MODERATE: {node} — algal levels rising. "
-                        f"Aerators activated as precaution. Monitor closely. [FALLBACK MODE]")
-            reason = (f"CHL-a={chla}μg/L and SABI={sabi} show early-stage bloom development. "
-                      f"Aeration initiated to disrupt thermal stratification.")
+            bulletin = f"MODERATE: {node} — algal levels rising (BLOOM={bloom}). Aerators activated."
+            reason = f"BLOOM level {bloom} shows early-stage bloom development. Aeration initiated."
         else:
             action  = "IDLE"
-            bulletin = (f"NOMINAL: {node} — water quality within safe parameters. "
-                        f"CHL-a={chla}μg/L. No intervention required. [FALLBACK MODE]")
-            reason = (f"All indices within safe ranges. "
-                      f"CHL-a={chla}μg/L, SABI={sabi}, CYANO={cyano}%. Monitoring continues.")
+            bulletin = f"NOMINAL: {node} — water quality safe (BLOOM={bloom})."
+            reason = f"BLOOM index at safe levels ({bloom}). Monitoring continues."
 
-        return {"reasoning": reason, "action": action,
-                "severity": severity, "bulletin": bulletin}
+        return {"reasoning": reason, "action": action, "severity": severity, "bulletin": bulletin}
 
     # ── Attempt real Ollama call ───────────────────────────────────────────────
     if not OLLAMA_AVAILABLE:
@@ -538,75 +345,35 @@ def call_ollama_agent(payload: dict, model: str = DEFAULT_MODEL) -> dict:
 
 class SimulationEngine:
     """
-    Orchestrates the four-sector environment, LoRa telemetry generation,
+    Orchestrates the single-node environment, LoRa telemetry processing,
     and AI inference scheduling.
-
-    Design:
-    ───────
-    A background thread runs the simulation loop. Results are placed into
-    thread-safe queues that the GUI polls via `after()` callbacks — this
-    keeps the Tkinter main thread exclusively for rendering.
-
-    Queues:
-        telemetry_queue  → raw LoRa payloads (one per sector per tick)
-        ai_queue         → AI analysis results (one per tick, best sector)
-        event_queue      → log/event strings for the terminal panel
     """
-
     def __init__(self):
-        # Initialise the four water sectors with varied bloom states and trends
-        self.sectors = [
-            SectorState(1, initial_bloom=0.05, trend=+0.008),  # Sector 1: slowly worsening
-            SectorState(2, initial_bloom=0.15, trend=+0.020),  # Sector 2: developing bloom ⚠
-            SectorState(3, initial_bloom=0.02, trend=-0.002),  # Sector 3: recovering
-            SectorState(4, initial_bloom=0.40, trend=+0.012),  # Sector 4: already elevated
-        ]
-
-        # Simulated clock — starts at 06:00 today, advances 15 min per tick
-        self.sim_time  = datetime.now().replace(hour=6, minute=0, second=0, microsecond=0)
-        self.tick_count = 0
-
-        # Queues for GUI communication
+        self.node = NodeState("worker_1")
+        self.sim_time    = datetime.now().replace(hour=6, minute=0, second=0, microsecond=0)
+        self.tick_count  = 0
         self.telemetry_queue = queue.Queue()
         self.ai_queue        = queue.Queue()
         self.event_queue     = queue.Queue()
-
-        # Simulation state
         self._running    = False
         self._paused     = False
-        self._thread     = None
-        self._ai_thread  = None
-        self.tick_interval = 4.0   # seconds between ticks (adjustable via slider)
+        self._ai_pending = False
+        self.tick_interval = 6.0
         self.model_name  = DEFAULT_MODEL
 
-        # Track which sector the AI is currently analysing
-        self._ai_pending = False
-
     def start(self):
-        """Start the background simulation thread."""
         self._running = True
         self._paused  = False
         self._thread  = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
 
-    def pause(self):
-        self._paused = True
-
-    def resume(self):
-        self._paused = False
-
-    def stop(self):
-        self._running = False
-
+    def pause(self):  self._paused = True
+    def resume(self): self._paused = False
+    def stop(self):   self._running = False
     def set_speed(self, interval_seconds: float):
-        """Adjust how long each simulated 15-minute interval takes in real time."""
         self.tick_interval = max(1.0, float(interval_seconds))
 
     def _run_loop(self):
-        """
-        Main simulation loop — runs in a daemon thread.
-        Reads real LoRa telemetry data via SPI and feeds it into the system.
-        """
         self.event_queue.put("[RX] LORA RADIO LISTENING...")
         if SPI_AVAILABLE:
             init_lora()
@@ -626,33 +393,29 @@ class SimulationEngine:
 
                     w(0x0D,fifo)
                     data = b(0x00,length)
-
                     w(0x12,0xFF)
 
                     text = bytes(data).decode(errors="ignore")
+                    print(f"\\n[LORA RAW PAYLOAD]\\n{text}\\n")
 
                     try:
                         obj = json.loads(text)
-                        bloom = float(obj.get("indices",{}).get("BLOOM",0))
-                        node = obj.get("node","unknown")
+                        indices = obj.get("indices", {})
+                        bloom = float(indices.get("BLOOM", 0))
+                        exg = float(indices.get("EXG", 0))
+                        gli = float(indices.get("GLI", 0))
+                        node_id = obj.get("node", "worker_1")
                     except:
-                        bloom = 0
-                        node = "unknown"
+                        bloom, exg, gli, node_id = 0, 0, 0, "unknown"
                         obj = {}
 
-                    node_num = 1
-                    try:
-                        if "NODE-" in node:
-                            node_num = int(node.split("-")[1])
-                    except:
-                        pass
-                    if not (1 <= node_num <= 4):
-                        node_num = 1
-
-                    sector = self.sectors[node_num - 1]
-                    
-                    # Align simulation physics with new telemetry data
-                    sector.bloom_level = bloom
+                    self.node.node_id = node_id
+                    self.node.trend = compute_trend(bloom, self.node.bloom_level)
+                    self.node.bloom_level = bloom
+                    self.node.exg = exg
+                    self.node.gli = gli
+                    self.node.health = compute_health(bloom)
+                    self.node.risk = risk_level(bloom)
                     
                     self.sim_time += timedelta(minutes=15)
                     self.tick_count += 1
@@ -662,14 +425,11 @@ class SimulationEngine:
                         f" {'🔴' if bloom>0.7 else '🟢'}"
                     )
                     
-                    payload = build_lora_payload(sector, self.sim_time)
-                    payload["node_id"] = node
-                    if obj.get("raw"):
-                        payload["raw"] = obj.get("raw")
+                    payload = build_lora_payload(self.node, self.sim_time, text)
 
                     self.event_queue.put(
-                        f"  ↗ LoRa RX  {node} → QUEEN  "
-                        f"[bloom={sector.bloom_level:.2f}  sev={sector.severity}]"
+                        f"  ↗ LoRa RX  {node_id} → QUEEN  "
+                        f"[bloom={self.node.bloom_level:.2f}  sev={self.node.risk}]"
                     )
                     self.telemetry_queue.put(payload)
 
@@ -683,9 +443,6 @@ class SimulationEngine:
                         ai_t.start()
 
                     init_lora()
-            else:
-                # Idle when SPI is not available (e.g. testing on PC)
-                pass
 
             time.sleep(0.02)
 
@@ -694,8 +451,8 @@ class SimulationEngine:
         Call the Ollama AI controller, parse the response, apply any
         interventions back to the sector state, and push results to ai_queue.
         """
-        node_num = int(payload["node_id"].split("-")[1])
-        sector   = self.sectors[node_num - 1]
+        node_num = payload["node_id"]
+        sector = self.node
 
         self.event_queue.put(
             f"  🤖 SANA-BRAIN analysing {payload['node_id']}..."
@@ -925,65 +682,29 @@ class SANADashboard(ctk.CTk):
         c.delete("all")
         w = c.winfo_width()
         h = c.winfo_height()
-        if w < 10 or h < 10:
-            return
+        if w < 10 or h < 10: return
 
-        # ── Water body ────────────────────────────────────────────────────────
         cx, cy = w * 0.5, h * 0.5
         rx, ry = w * 0.36, h * 0.42
-        c.create_oval(cx-rx, cy-ry, cx+rx, cy+ry,
-                      fill="#0A1828", outline=COLORS["border_bright"], width=1)
-        c.create_text(cx, cy, text="◈ LAKE", fill=COLORS["text_dim"],
-                      font=("Courier New", 10))
+        c.create_oval(cx-rx, cy-ry, cx+rx, cy+ry, fill="#0A1828", outline=COLORS["border_bright"], width=1)
+        c.create_text(cx, cy-50, text="◈ LAKE", fill=COLORS["text_dim"], font=("Courier New", 10))
 
-        # ── Queen node (centre) ───────────────────────────────────────────────
-        c.create_oval(cx-10, cy-10, cx+10, cy+10,
-                      fill=COLORS["cyan_dim"], outline=COLORS["cyan"], width=2)
-        c.create_text(cx, cy+20, text="QUEEN", fill=COLORS["cyan"],
-                      font=("Courier New", 8, "bold"))
+        node = self.engine.node
+        severity = node.risk
+        color = SEVERITY_COLORS.get(severity, COLORS["green"])
+        pulse_r = 25 + int(node.bloom_level * 15)
 
-        # ── Worker nodes ──────────────────────────────────────────────────────
-        self.map_node_items = {}
-        for i, (fx, fy) in enumerate(self.node_positions):
-            sector   = self.engine.sectors[i]
-            x, y     = w * fx, h * fy
-            severity = sector.severity
-            color    = SEVERITY_COLORS.get(severity, COLORS["green"])
-            pulse_r  = 14 + int(sector.bloom_level * 10)
+        c.create_oval(cx-pulse_r, cy-pulse_r, cx+pulse_r, cy+pulse_r, fill="", outline=color, width=1, dash=(3,3))
+        c.create_oval(cx-20, cy-20, cx+20, cy+20, fill=COLORS["bg_card"], outline=color, width=3)
+        c.create_text(cx, cy, text="WORKER", fill=color, font=("Courier New", 10, "bold"))
+        c.create_text(cx, cy+32, text=node.node_id, fill=COLORS["cyan"], font=("Courier New", 9, "bold"))
+        c.create_text(cx, cy+45, text=severity, fill=color, font=("Courier New", 8, "bold"))
 
-            # Pulsing ring (bloom radius visual)
-            c.create_oval(x-pulse_r, y-pulse_r, x+pulse_r, y+pulse_r,
-                          fill="", outline=color, width=1, dash=(3,3))
-
-            # Node body
-            c.create_oval(x-10, y-10, x+10, y+10,
-                          fill=COLORS["bg_card"], outline=color, width=2)
-            c.create_text(x, y, text=f"{i+1}", fill=color,
-                          font=("Courier New", 9, "bold"))
-            c.create_text(x, y+18, text=f"N-{i+1:02d}", fill=COLORS["text_normal"],
-                          font=("Courier New", 7))
-            c.create_text(x, y+28, text=severity, fill=color,
-                          font=("Courier New", 7, "bold"))
-
-            # Bloom % bar
-            bar_w = 36
-            bar_h = 4
-            c.create_rectangle(x-bar_w//2, y+34, x+bar_w//2, y+34+bar_h,
-                                fill=COLORS["bg_terminal"], outline="")
-            filled = int((bar_w) * sector.bloom_level)
-            if filled > 0:
-                c.create_rectangle(x-bar_w//2, y+34,
-                                   x-bar_w//2+filled, y+34+bar_h,
-                                   fill=color, outline="")
-
-            # LoRa spokes to queen
-            c.create_line(x, y, cx, cy,
-                          fill=COLORS["border"], width=1, dash=(2,4))
-
-            # Aerator indicator
-            if sector.aeration_ticks > 0:
-                c.create_text(x, y-20, text="⚡AER", fill=COLORS["blue"],
-                              font=("Courier New", 7, "bold"))
+        bar_w, bar_h = 50, 6
+        c.create_rectangle(cx-bar_w//2, cy+55, cx+bar_w//2, cy+55+bar_h, fill=COLORS["bg_terminal"], outline="")
+        filled = int(bar_w * node.bloom_level)
+        if filled > 0:
+            c.create_rectangle(cx-bar_w//2, cy+55, cx-bar_w//2+filled, cy+55+bar_h, fill=color, outline="")
 
     # ── BULLETIN BOARD ───────────────────────────────────────────────────────
 
@@ -1341,48 +1062,34 @@ class SANADashboard(ctk.CTk):
         ts       = payload["timestamp"]
         sev      = payload["severity"]
         bloom    = payload["bloom_level"]
-        aer      = "⚡AER " if payload.get("aeration_active") else ""
         sev_tag  = sev.lower()
 
-        # Divider + header
-        self._telem_append(f"\n{'─'*52}\n", "dim")
-        self._telem_append(f"  ↗ {node}  @{ts}  {aer}", "header")
-        self._telem_append(f"[{sev}]", sev_tag)
-        self._telem_append(f"  bloom={bloom:.2f}\n", "dim")
+        self._telem_append(f"\\n{'─'*52}\\n", "dim")
+        self._telem_append(f"  ↗ {node}  @{ts}", "header")
+        self._telem_append(f"  [{sev}]\\n", sev_tag)
 
-        # Key indices table
         idx = payload["indices"]
         rows = [
-            ("NDVI",     idx["NDVI"]["value"],      "",      idx["NDVI"]["status"]),
-            ("SABI",     idx["SABI"]["value"],      "",      idx["SABI"]["status"]),
-            ("NDWI",     idx["NDWI"]["value"],      "",      idx["NDWI"]["status"]),
-            ("CHL-a",    idx["CHL-a"]["value"],     "μg/L",  idx["CHL-a"]["status"]),
-            ("TURBIDITY",idx["Turbidity"]["value"], "NTU",   idx["Turbidity"]["status"]),
-            ("SECCHI",   idx["Secchi"]["value"],    "m",     ""),
-            ("COVERAGE", idx["Coverage"]["value"],  "%",     ""),
-            ("CYANO",    idx["CYANO-PROXY"]["value"],"risk%",idx["CYANO-PROXY"]["status"]),
+            ("EXG",      f"{idx['EXG']['value']:.3f}"),
+            ("GLI",      f"{idx['GLI']['value']:.3f}"),
+            ("BLOOM",    f"{idx['BLOOM']['value']:.3f}"),
+            ("HEALTH",   f"{payload['health']:.1f}%"),
+            ("TREND",    payload["trend"]),
         ]
 
-        for label, value, unit, status in rows:
-            # Colour value by severity contribution
-            v_str  = f"{value:>7.2f} {unit:<5}"
-            s_str  = status
-
-            # Determine value colour
-            if label == "CHL-a":
-                v_tag = "critical" if value>=50 else "high" if value>=25 else "moderate" if value>=10 else "low"
-            elif label == "CYANO":
-                v_tag = "critical" if value>=80 else "high" if value>=50 else "moderate" if value>=20 else "low"
-            elif label == "SABI":
-                v_tag = "critical" if value>=0.7 else "high" if value>=0.45 else "moderate" if value>=0.2 else "low"
+        for label, value in rows:
+            if label == "BLOOM":
+                v_tag = "critical" if idx['BLOOM']['value']>=0.8 else "high" if idx['BLOOM']['value']>=0.5 else "low"
+            elif label == "HEALTH":
+                v_tag = "critical" if payload['health']<=20 else "low"
             else:
                 v_tag = "value"
 
             self._telem_append(f"    {label:<12}", "label")
-            self._telem_append(f"{v_str}", v_tag)
-            if s_str:
-                self._telem_append(f"  {s_str}", "dim")
-            self._telem_append("\n")
+            self._telem_append(f"{value}\\n", v_tag)
+        
+        self._telem_append(f"\\n    RAW: ", "dim")
+        self._telem_append(f"{payload['raw']}\\n", "dim")
 
     def _render_ai_result(self, item: dict):
         """Format and display an AI analysis result in the AI terminal panel."""

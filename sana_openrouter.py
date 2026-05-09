@@ -145,110 +145,33 @@ SEVERITY_COLORS = {
 #  SECTOR PHYSICS ENGINE
 # ═════════════════════════════════════════════════════════════════════════════
 
-class SectorState:
+class NodeState:
     """
-    Living environmental state for one water sector.
-
-    bloom_level (0.0–1.0) is the master state variable.
-    All spectral/chemical indices are derived as calibrated noisy functions
-    of bloom_level, mimicking real multispectral sensor physics.
+    Holds the living environmental state for the single LoRa worker node.
     """
+    def __init__(self, node_id: str):
+        self.node_id = node_id
+        self.bloom_level = 0.0
+        self.exg = 0.0
+        self.gli = 0.0
+        self.health = 100.0
+        self.risk = "LOW"
+        self.trend = "STABLE"
+        self.last_action = "IDLE"
 
-    def __init__(self, node_id: int, initial_bloom: float, trend: float):
-        self.node_id        = node_id
-        self.bloom_level    = initial_bloom
-        self.trend          = trend
-        self.aeration_ticks = 0
-        self.severity       = "LOW"
-        self.last_action    = "IDLE"
+def compute_health(bloom: float) -> float:
+    return max(0.0, 100.0 - (bloom * 100.0))
 
-    def _noise(self, scale: float = 0.01) -> float:
-        return random.gauss(0, scale)
+def risk_level(bloom: float) -> str:
+    if bloom < 0.2: return "LOW"
+    elif bloom < 0.5: return "MODERATE"
+    elif bloom < 0.8: return "HIGH"
+    return "CRITICAL"
 
-    def tick(self):
-        """Advance one 15-minute simulated interval."""
-        if self.aeration_ticks > 0:
-            # Aerators fight growth AND actively reduce bloom
-            effective_trend  = self.trend - 0.04
-            self.bloom_level = max(0.0, self.bloom_level + effective_trend)
-            self.aeration_ticks -= 1
-        else:
-            self.bloom_level = max(0.0, min(1.0, self.bloom_level + self.trend))
-
-        # Logistic ceiling brake
-        if self.bloom_level > 0.85:
-            self.trend = max(self.trend - 0.002, -0.005)
-
-        # Climatic noise
-        self.trend += random.gauss(0, 0.001)
-        self.trend  = max(-0.02, min(0.03, self.trend))
-
-    def activate_aeration(self, duration_ticks: int = 6):
-        self.aeration_ticks = duration_ticks
-        self.last_action    = "ACTIVATE_AERATOR"
-
-    def get_indices(self) -> dict:
-        """Derive all spectral and chemical indices from bloom_level."""
-        b = self.bloom_level
-
-        ndvi      = 0.05 + b * 0.65 + self._noise(0.015)
-        sabi      = -0.1  + b * 1.1  + self._noise(0.02)
-        ndwi      = 0.3   - b * 0.7  + self._noise(0.015)
-        ndci      = -0.05 + b * 0.85 + self._noise(0.02)
-        bci       = 0.0   + b * 0.9  + self._noise(0.025)
-        fai       = -0.02 + b * 0.55 + self._noise(0.01)
-
-        chla      = max(1.0,  2.0 + math.exp(b * 4.6) * 1.5 + random.gauss(0, 2.0))
-        turbidity = max(0.5,  1.5 + b * 48.5 + random.gauss(0, 1.5))
-        secchi    = max(0.2,  4.5 - b * 4.0  + self._noise(0.1))
-        coverage  = max(0.0,  min(100.0, b * 100.0 + random.gauss(0, 2.0)))
-        cyano     = max(0,    min(100, b * 110 + random.gauss(0, 3)))
-        abi       = max(0,    b * 0.95 + self._noise(0.02))
-        nutrient  = 0.1 + b * 0.9 + self._noise(0.02)
-
-        return {
-            "NDVI":     round(ndvi,      3),
-            "SABI":     round(sabi,      3),
-            "NDWI":     round(ndwi,      3),
-            "NDCI":     round(ndci,      3),
-            "BCI":      round(bci,       3),
-            "FAI":      round(fai,       3),
-            "CHL-a":    round(chla,      2),
-            "Turbidity":round(turbidity, 2),
-            "Secchi":   round(secchi,    2),
-            "Coverage": round(coverage,  1),
-            "CYANO":    round(cyano,     1),
-            "ABI":      round(abi,       3),
-            "Nutrient": round(nutrient,  3),
-        }
-
-
-def classify_severity(indices: dict) -> str:
-    chla  = indices["CHL-a"]
-    cyano = indices["CYANO"]
-    sabi  = indices["SABI"]
-    if chla >= 50 or cyano >= 80 or sabi >= 0.7:  return "CRITICAL"
-    elif chla >= 25 or cyano >= 50 or sabi >= 0.45: return "HIGH"
-    elif chla >= 10 or cyano >= 20 or sabi >= 0.2:  return "MODERATE"
-    else:                                            return "LOW"
-
-
-def format_index_status(key: str, value: float) -> str:
-    thresholds = {
-        "NDVI":      [(0.1,"CLEAR"),(0.3,"SPARSE VEG"),(0.5,"ACTIVE VEG"),(1.0,"DENSE MAT")],
-        "SABI":      [(-0.05,"CLEAN"),(0.2,"EARLY BLOOM"),(0.5,"SURFACE BLOOM"),(1.0,"SEVERE BLOOM")],
-        "NDWI":      [(-0.5,"COVERED"),(0.0,"TURBID"),(0.2,"MIXED"),(1.0,"CLEAR WATER")],
-        "CYANO":     [(20,"SAFE"),(50,"CAUTION"),(80,"TOXIC"),(100,"EXTREME TOXIC")],
-        "CHL-a":     [(10,"NORMAL"),(25,"ELEVATED"),(50,"HIGH"),(200,"CRITICAL")],
-        "Turbidity": [(5,"CLEAR"),(15,"MODERATE"),(30,"TURBID"),(100,"OPAQUE")],
-    }
-    if key not in thresholds:
-        return "OK" if value < 0.5 else "ELEVATED"
-    for threshold, label in thresholds[key]:
-        if value <= threshold:
-            return label
-    return thresholds[key][-1][1]
-
+def compute_trend(current: float, previous: float) -> str:
+    if current > previous + 0.02: return "RISING"
+    if current < previous - 0.02: return "FALLING"
+    return "STABLE"
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  LORA TELEMETRY ENGINE
@@ -290,7 +213,7 @@ def build_lora_payload(sector: SectorState, sim_time: datetime) -> dict:
 
 SANA_SYSTEM_PROMPT = """You are SANA-BRAIN, the agentic AI controller of the SANA (Smart Autonomous Natural Agent) environmental monitoring network deployed on a freshwater lake.
 
-You receive real-time telemetry from autonomous surface nodes measuring eutrophication and algal bloom conditions.
+You receive real-time telemetry from an autonomous surface node measuring eutrophication via EXG and GLI indices.
 
 Your job is to:
 1. Analyze the incoming telemetry data
@@ -298,7 +221,7 @@ Your job is to:
 3. Issue an automated response command
 4. Generate a brief public safety bulletin
 
-You MUST respond with ONLY a single valid JSON object — no markdown, no explanations outside the JSON. The JSON must have exactly these four fields:
+You MUST respond with ONLY a single valid JSON object — no markdown, no explanations outside the JSON. The JSON must have exactly these fields:
 
 {
   "reasoning": "<2-3 sentences of chain-of-thought analysis of the key indices>",
@@ -313,96 +236,102 @@ Action selection guidelines:
 - DEPLOY_CHEMICALS: HIGH with cyanotoxin risk — apply algaecide/flocculant
 - CRITICAL_HUMAN_INTERVENTION: CRITICAL — bloom is toxic, immediate human response required
 
-Respond ONLY with the JSON object. No preamble, no markdown fences."""
+Respond ONLY with the JSON object."""
 
 
-def call_openrouter_agent(payload: dict, api_key: str,
-                          model: str = "google/gemma-3-27b-it:free") -> dict:
+def call_openrouter_agent(payload: dict, api_key: str, model: str = FREE_MODELS[0]) -> dict:
     """
-    Send telemetry payload to OpenRouter's free Gemma endpoint and parse response.
-
-    OpenRouter is OpenAI-compatible:
-        POST https://openrouter.ai/api/v1/chat/completions
-        Authorization: Bearer <api_key>
-        Content-Type: application/json
-
-    Threading contract: always called from a worker thread, never the GUI thread.
-
-    Returns a dict: {reasoning, action, severity, bulletin}
-    Falls back to rule-based response on any error (network, auth, parse).
+    Send telemetry payload to OpenRouter and parse the response.
     """
-
-    # ── Rule-based fallback (used when API is unavailable or fails) ───────────
-    def rule_based_fallback(payload: dict, note: str = "") -> dict:
+    def rule_based_fallback(payload: dict, tag: str = "[FALLBACK]") -> dict:
         severity = payload.get("severity", "LOW")
         node     = payload["node_id"]
-        chla     = payload["indices"]["CHL-a"]["value"]
-        cyano    = payload["indices"]["CYANO-PROXY"]["value"]
-        sabi     = payload["indices"]["SABI"]["value"]
-        tag      = f" [FALLBACK{': ' + note if note else ''}]"
+        bloom    = payload["bloom_level"]
 
         if severity == "CRITICAL":
-            return {
-                "action":    "CRITICAL_HUMAN_INTERVENTION",
-                "severity":  severity,
-                "reasoning": f"CHL-a={chla}μg/L and CYANO={cyano}% exceed WHO toxic thresholds. SABI={sabi} confirms active surface bloom. Emergency protocols triggered.{tag}",
-                "bulletin":  f"⚠ CRITICAL: {node} reports toxic bloom (CHL-a={chla}μg/L). Avoid all water contact. Emergency services notified.{tag}",
-            }
+            action  = "CRITICAL_HUMAN_INTERVENTION"
+            bulletin = f"⚠ CRITICAL ALERT: {node} reports toxic bloom (BLOOM={bloom}). Avoid all water contact. Emergency services notified. {tag}"
+            reason = f"BLOOM level {bloom} exceeds critical thresholds. Immediate human intervention required."
         elif severity == "HIGH":
-            return {
-                "action":    "DEPLOY_CHEMICALS",
-                "severity":  severity,
-                "reasoning": f"SABI={sabi} and CHL-a={chla}μg/L indicate active mid-stage bloom. Cyanobacterial risk elevated (CYANO={cyano}%). Chemical intervention warranted.{tag}",
-                "bulletin":  f"HIGH ALERT: {node} — elevated algal activity. Algaecide deployment authorised. Recreational use suspended.{tag}",
-            }
+            action  = "DEPLOY_CHEMICALS"
+            bulletin = f"HIGH ALERT: {node} — elevated algal activity detected (BLOOM={bloom}). Algaecide deployment authorized. {tag}"
+            reason = f"BLOOM level {bloom} indicates active bloom. Chemical intervention warranted."
         elif severity == "MODERATE":
-            return {
-                "action":    "ACTIVATE_AERATOR",
-                "severity":  severity,
-                "reasoning": f"CHL-a={chla}μg/L and SABI={sabi} show early bloom development. Aeration initiated to disrupt thermal stratification.{tag}",
-                "bulletin":  f"MODERATE: {node} — algal levels rising. Aerators activated. Monitor closely.{tag}",
-            }
+            action  = "ACTIVATE_AERATOR"
+            bulletin = f"MODERATE: {node} — algal levels rising (BLOOM={bloom}). Aerators activated. {tag}"
+            reason = f"BLOOM level {bloom} shows early-stage bloom development. Aeration initiated."
         else:
-            return {
-                "action":    "IDLE",
-                "severity":  severity,
-                "reasoning": f"All indices within safe ranges. CHL-a={chla}μg/L, SABI={sabi}, CYANO={cyano}%. Monitoring continues.{tag}",
-                "bulletin":  f"NOMINAL: {node} — water quality within safe parameters. No intervention required.{tag}",
-            }
+            action  = "IDLE"
+            bulletin = f"NOMINAL: {node} — water quality safe (BLOOM={bloom}). {tag}"
+            reason = f"BLOOM index at safe levels ({bloom}). Monitoring continues."
 
-    # ── Guard: requests library must be available ─────────────────────────────
+        return {"reasoning": reason, "action": action, "severity": severity, "bulletin": bulletin}
+
     if not REQUESTS_AVAILABLE:
-        return rule_based_fallback(payload, "requests library missing")
+        return rule_based_fallback(payload, "[NO REQUESTS LIB]")
 
-    # ── Guard: API key must be provided ───────────────────────────────────────
     if not api_key or not api_key.strip().startswith("sk-"):
-        return rule_based_fallback(payload, "no valid API key")
+        return rule_based_fallback(payload, "[NO API KEY]")
 
-    # ── Build compact telemetry summary for the prompt ────────────────────────
     idx = payload["indices"]
     key_data = {
         "node":          payload["node_id"],
         "time":          payload["timestamp"],
         "severity":      payload["severity"],
-          parsed = json.loads(raw_text)
+        "bloom_level":   payload["bloom_level"],
+        "health":        payload["health"],
+        "exg":           idx["EXG"]["value"],
+        "gli":           idx["GLI"]["value"]
+    }
 
-        # Validate required keys
+    user_prompt = f"TELEMETRY PACKET:\\n{json.dumps(key_data, indent=2)}"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "HTTP-Referer": "https://sana.ai",
+        "X-Title": "SANA Lake Dashboard",
+        "Content-Type": "application/json"
+    }
+
+    body = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SANA_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt}
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.1
+    }
+
+    try:
+        resp = req_lib.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=body,
+            timeout=15
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        raw_text = data["choices"][0]["message"]["content"].strip()
+        
+        # Strip markdown json block if present
+        if raw_text.startswith("```json"):
+            raw_text = raw_text[7:]
+        if raw_text.startswith("```"):
+            raw_text = raw_text[3:]
+        if raw_text.endswith("```"):
+            raw_text = raw_text[:-3]
+            
+        parsed = json.loads(raw_text)
+
         for key in ("reasoning", "action", "severity", "bulletin"):
             if key not in parsed:
                 raise ValueError(f"Missing field: '{key}'")
 
         return parsed
 
-    except req_lib.exceptions.Timeout:
-        return rule_based_fallback(payload, "request timeout — try faster model")
-    except req_lib.exceptions.ConnectionError:
-        return rule_based_fallback(payload, "network unreachable")
-    except json.JSONDecodeError as e:
-        fb = rule_based_fallback(payload, f"JSON parse error: {e}")
-        return fb
     except Exception as e:
-        return rule_based_fallback(payload, f"{type(e).__name__}: {e}")
-
+        return rule_based_fallback(payload, f"[API ERROR: {e}]")
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  SIMULATION ENGINE
@@ -410,48 +339,32 @@ def call_openrouter_agent(payload: dict, api_key: str,
 
 class SimulationEngine:
     """
-    Orchestrates the four-sector environment, LoRa telemetry generation,
+    Orchestrates the single-node environment, LoRa telemetry processing,
     and AI inference scheduling.
-
-    Thread model:
-        • _run_loop  : background daemon thread — advances state, produces payloads
-        • _run_ai_analysis : per-tick daemon thread — calls OpenRouter, applies actions
-        • GUI polls three queues via after() callbacks:
-            telemetry_queue, ai_queue, event_queue
     """
-
     def __init__(self):
-        self.sectors = [
-            SectorState(1, initial_bloom=0.05, trend=+0.008),
-            SectorState(2, initial_bloom=0.15, trend=+0.020),
-            SectorState(3, initial_bloom=0.02, trend=-0.002),
-            SectorState(4, initial_bloom=0.40, trend=+0.012),
-        ]
-
+        self.node = NodeState("worker_1")
         self.sim_time    = datetime.now().replace(hour=6, minute=0, second=0, microsecond=0)
         self.tick_count  = 0
-
         self.telemetry_queue = queue.Queue()
         self.ai_queue        = queue.Queue()
         self.event_queue     = queue.Queue()
-
         self._running    = False
         self._paused     = False
         self._ai_pending = False
-        self.tick_interval = 6.0    # a bit slower default — free tier has latency
+        self.tick_interval = 6.0
         self.model_name  = FREE_MODELS[0]
         self.api_key     = os.environ.get("OPENROUTER_API_KEY", "")
 
     def start(self):
         self._running = True
         self._paused  = False
-        t = threading.Thread(target=self._run_loop, daemon=True)
-        t.start()
+        self._thread  = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
 
     def pause(self):  self._paused = True
     def resume(self): self._paused = False
     def stop(self):   self._running = False
-
     def set_speed(self, interval_seconds: float):
         self.tick_interval = max(1.0, float(interval_seconds))
 
@@ -475,33 +388,29 @@ class SimulationEngine:
 
                     w(0x0D,fifo)
                     data = b(0x00,length)
-
                     w(0x12,0xFF)
 
                     text = bytes(data).decode(errors="ignore")
+                    print(f"\\n[LORA RAW PAYLOAD]\\n{text}\\n")
 
                     try:
                         obj = json.loads(text)
-                        bloom = float(obj.get("indices",{}).get("BLOOM",0))
-                        node = obj.get("node","unknown")
+                        indices = obj.get("indices", {})
+                        bloom = float(indices.get("BLOOM", 0))
+                        exg = float(indices.get("EXG", 0))
+                        gli = float(indices.get("GLI", 0))
+                        node_id = obj.get("node", "worker_1")
                     except:
-                        bloom = 0
-                        node = "unknown"
+                        bloom, exg, gli, node_id = 0, 0, 0, "unknown"
                         obj = {}
 
-                    node_num = 1
-                    try:
-                        if "NODE-" in node:
-                            node_num = int(node.split("-")[1])
-                    except:
-                        pass
-                    if not (1 <= node_num <= 4):
-                        node_num = 1
-
-                    sector = self.sectors[node_num - 1]
-                    
-                    # Align simulation physics with new telemetry data
-                    sector.bloom_level = bloom
+                    self.node.node_id = node_id
+                    self.node.trend = compute_trend(bloom, self.node.bloom_level)
+                    self.node.bloom_level = bloom
+                    self.node.exg = exg
+                    self.node.gli = gli
+                    self.node.health = compute_health(bloom)
+                    self.node.risk = risk_level(bloom)
                     
                     self.sim_time += timedelta(minutes=15)
                     self.tick_count += 1
@@ -511,28 +420,24 @@ class SimulationEngine:
                         f" {'🔴' if bloom>0.7 else '🟢'}"
                     )
                     
-                    payload = build_lora_payload(sector, self.sim_time)
-                    payload["node_id"] = node
-                    if obj.get("raw"):
-                        payload["raw"] = obj.get("raw")
+                    payload = build_lora_payload(self.node, self.sim_time, text)
 
                     self.event_queue.put(
-                        f"  ↗ LoRa RX  {node} → QUEEN  "
-                        f"[bloom={sector.bloom_level:.2f}  sev={sector.severity}]"
+                        f"  ↗ LoRa RX  {node_id} → QUEEN  "
+                        f"[bloom={self.node.bloom_level:.2f}  sev={self.node.risk}]"
                     )
                     self.telemetry_queue.put(payload)
 
                     if not self._ai_pending:
                         self._ai_pending = True
-                        threading.Thread(
+                        ai_t = threading.Thread(
                             target=self._run_ai_analysis,
                             args=(payload,),
                             daemon=True
-                        ).start()
+                        )
+                        ai_t.start()
 
                     init_lora()
-            else:
-                pass
 
             time.sleep(0.02)
 
@@ -820,283 +725,31 @@ class SANADashboard(ctk.CTk):
     def _redraw_map(self, event=None):
         c = self.map_canvas
         c.delete("all")
-        w = c.winfo_width();  h = c.winfo_height()
+        w = c.winfo_width()
+        h = c.winfo_height()
         if w < 10 or h < 10: return
 
-        cx, cy = w*0.5, h*0.5
-        rx, ry = w*0.36, h*0.42
-        c.create_oval(cx-rx, cy-ry, cx+rx, cy+ry,
-                      fill="#0A1828", outline=COLORS["border_bright"], width=1)
-        c.create_text(cx, cy, text="◈ LAKE", fill=COLORS["text_dim"],
-                      font=("Courier New", 10))
-        c.create_oval(cx-10, cy-10, cx+10, cy+10,
-                      fill=COLORS["cyan_dim"], outline=COLORS["cyan"], width=2)
-        c.create_text(cx, cy+20, text="QUEEN", fill=COLORS["cyan"],
-                      font=("Courier New", 8, "bold"))
+        cx, cy = w * 0.5, h * 0.5
+        rx, ry = w * 0.36, h * 0.42
+        c.create_oval(cx-rx, cy-ry, cx+rx, cy+ry, fill="#0A1828", outline=COLORS["border_bright"], width=1)
+        c.create_text(cx, cy-50, text="◈ LAKE", fill=COLORS["text_dim"], font=("Courier New", 10))
 
-        for i, (fx, fy) in enumerate(self.node_positions):
-            sector  = self.engine.sectors[i]
-            x, y    = w*fx, h*fy
-            color   = SEVERITY_COLORS.get(sector.severity, COLORS["green"])
-            pulse_r = 14 + int(sector.bloom_level * 10)
+        node = self.engine.node
+        severity = node.risk
+        color = SEVERITY_COLORS.get(severity, COLORS["green"])
+        pulse_r = 25 + int(node.bloom_level * 15)
 
-            c.create_oval(x-pulse_r, y-pulse_r, x+pulse_r, y+pulse_r,
-                          fill="", outline=color, width=1, dash=(3,3))
-            c.create_oval(x-10, y-10, x+10, y+10,
-                          fill=COLORS["bg_card"], outline=color, width=2)
-            c.create_text(x, y, text=f"{i+1}", fill=color,
-                          font=("Courier New", 9, "bold"))
-            c.create_text(x, y+18, text=f"N-{i+1:02d}", fill=COLORS["text_normal"],
-                          font=("Courier New", 7))
-            c.create_text(x, y+28, text=sector.severity, fill=color,
-                          font=("Courier New", 7, "bold"))
+        c.create_oval(cx-pulse_r, cy-pulse_r, cx+pulse_r, cy+pulse_r, fill="", outline=color, width=1, dash=(3,3))
+        c.create_oval(cx-20, cy-20, cx+20, cy+20, fill=COLORS["bg_card"], outline=color, width=3)
+        c.create_text(cx, cy, text="WORKER", fill=color, font=("Courier New", 10, "bold"))
+        c.create_text(cx, cy+32, text=node.node_id, fill=COLORS["cyan"], font=("Courier New", 9, "bold"))
+        c.create_text(cx, cy+45, text=severity, fill=color, font=("Courier New", 8, "bold"))
 
-            bw = 36
-            c.create_rectangle(x-bw//2, y+34, x+bw//2, y+38,
-                                fill=COLORS["bg_terminal"], outline="")
-            filled = int(bw * sector.bloom_level)
-            if filled > 0:
-                c.create_rectangle(x-bw//2, y+34, x-bw//2+filled, y+38,
-                                   fill=color, outline="")
-
-            c.create_line(x, y, cx, cy, fill=COLORS["border"], width=1, dash=(2,4))
-
-            if sector.aeration_ticks > 0:
-                c.create_text(x, y-20, text="⚡AER", fill=COLORS["blue"],
-                              font=("Courier New", 7, "bold"))
-
-    def _build_bulletin_board(self, parent):
-        content = ctk.CTkFrame(parent, fg_color=COLORS["bg_panel"],
-                               corner_radius=6, border_width=1,
-                               border_color=COLORS["border"])
-        content.grid(row=1, column=0, sticky="nsew")
-
-        tb = ctk.CTkFrame(content, fg_color=COLORS["bg_card"], corner_radius=0, height=26)
-        tb.pack(fill="x", side="top")
-        tb.pack_propagate(False)
-        ctk.CTkLabel(tb, text="  📢 PUBLIC BULLETIN BOARD",
-                     font=ctk.CTkFont(family="Courier New", size=10, weight="bold"),
-                     text_color=COLORS["cyan_dim"], anchor="w").pack(side="left", fill="y")
-
-        self.bulletin_text = ctk.CTkTextbox(
-            content, fg_color=COLORS["bg_terminal"],
-            font=ctk.CTkFont(family="Courier New", size=10),
-            text_color=COLORS["text_bright"],
-            corner_radius=0, wrap="word", state="disabled",
-        )
-        self.bulletin_text.pack(fill="both", expand=True, padx=4, pady=4)
-        self._configure_text_tags(self.bulletin_text)
-
-    def _build_telemetry_panel(self, parent):
-        content = ctk.CTkFrame(parent, fg_color=COLORS["bg_panel"],
-                               corner_radius=6, border_width=1,
-                               border_color=COLORS["border"])
-        content.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(0,4))
-
-        tb = ctk.CTkFrame(content, fg_color=COLORS["bg_card"], corner_radius=0, height=26)
-        tb.pack(fill="x", side="top")
-        tb.pack_propagate(False)
-        ctk.CTkLabel(tb, text="  📡 LIVE TELEMETRY STREAM  ·  LoRa RX → QUEEN NODE",
-                     font=ctk.CTkFont(family="Courier New", size=10, weight="bold"),
-                     text_color=COLORS["cyan_dim"], anchor="w").pack(side="left", fill="y")
-
-        self.telem_text = ctk.CTkTextbox(
-            content, fg_color=COLORS["bg_terminal"],
-            font=ctk.CTkFont(family="Courier New", size=10),
-            text_color=COLORS["text_bright"],
-            corner_radius=0, wrap="none", state="disabled",
-        )
-        self.telem_text.pack(fill="both", expand=True, padx=4, pady=4)
-        self._configure_text_tags(self.telem_text)
-        self._append(self.telem_text,
-            "  SANA QUEEN NODE  —  WAITING FOR TELEMETRY\n"
-            "  ─────────────────────────────────────────\n"
-            "  Press START to begin receiving LoRa packets.\n\n", "dim")
-
-    def _build_ai_terminal(self, parent):
-        content = ctk.CTkFrame(parent, fg_color=COLORS["bg_panel"],
-                               corner_radius=6, border_width=1,
-                               border_color=COLORS["border"])
-        content.grid(row=0, column=2, rowspan=2, sticky="nsew")
-
-        tb = ctk.CTkFrame(content, fg_color=COLORS["bg_card"], corner_radius=0, height=26)
-        tb.pack(fill="x", side="top")
-        tb.pack_propagate(False)
-        ctk.CTkLabel(tb, text="  🤖 SANA-BRAIN  ·  AGENTIC AI  (OpenRouter)",
-                     font=ctk.CTkFont(family="Courier New", size=10, weight="bold"),
-                     text_color=COLORS["purple"], anchor="w").pack(side="left", fill="y")
-
-        self.ai_text = ctk.CTkTextbox(
-            content, fg_color=COLORS["bg_terminal"],
-            font=ctk.CTkFont(family="Courier New", size=10),
-            text_color=COLORS["text_bright"],
-            corner_radius=0, wrap="word", state="disabled",
-        )
-        self.ai_text.pack(fill="both", expand=True, padx=4, pady=4)
-        self._configure_text_tags(self.ai_text)
-
-        key_state = "KEY SET ✓" if self.engine.api_key else "⚠ NO KEY — fallback mode"
-        self._append(self.ai_text,
-            "  SANA-BRAIN OFFLINE\n"
-            "  ──────────────────────────────────────\n"
-            f"  API key : {key_state}\n"
-            f"  Model   : {self.engine.model_name}\n"
-            "  Backend : OpenRouter (free Gemma)\n\n", "dim")
-
-    def _build_control_bar(self):
-        bar = ctk.CTkFrame(self, fg_color=COLORS["bg_panel"], corner_radius=0, height=50)
-        bar.pack(fill="x", side="bottom")
-        bar.pack_propagate(False)
-
-        # Play / pause
-        self.play_btn = ctk.CTkButton(
-            bar, text="▶  START", width=120, height=34,
-            font=ctk.CTkFont(family="Courier New", size=11, weight="bold"),
-            fg_color=COLORS["green_dim"], hover_color=COLORS["green"],
-            text_color=COLORS["bg_dark"], command=self._toggle_simulation,
-        )
-        self.play_btn.pack(side="left", padx=12, pady=8)
-
-        # Speed
-        ctk.CTkLabel(bar, text="SPEED:",
-                     font=ctk.CTkFont(family="Courier New", size=10),
-                     text_color=COLORS["text_normal"]).pack(side="left", padx=(12,2))
-
-        self.speed_label = ctk.CTkLabel(bar, text="6s/tick",
-                                        font=ctk.CTkFont(family="Courier New", size=10),
-                                        text_color=COLORS["cyan"], width=60)
-        self.speed_label.pack(side="left", padx=(0,4))
-
-        self.speed_slider = ctk.CTkSlider(
-            bar, from_=2, to=30, width=160, height=18,
-            command=self._on_speed_change,
-            button_color=COLORS["cyan"], button_hover_color=COLORS["cyan_dim"],
-            progress_color=COLORS["border_bright"], fg_color=COLORS["border"],
-        )
-        self.speed_slider.set(6)
-        self.speed_slider.pack(side="left", padx=4)
-
-        ctk.CTkLabel(bar, text="│",
-                     text_color=COLORS["border_bright"]).pack(side="left", padx=10)
-
-        # Model selector — only free OpenRouter Gemma models
-        ctk.CTkLabel(bar, text="MODEL:",
-                     font=ctk.CTkFont(family="Courier New", size=10),
-                     text_color=COLORS["text_normal"]).pack(side="left", padx=(0,4))
-
-        self.model_var = ctk.StringVar(value=FREE_MODELS[0])
-        ctk.CTkOptionMenu(
-            bar, values=FREE_MODELS,
-            variable=self.model_var,
-            width=230, height=30,
-            font=ctk.CTkFont(family="Courier New", size=9),
-            fg_color=COLORS["bg_card"],
-            button_color=COLORS["border_bright"],
-            button_hover_color=COLORS["border"],
-            text_color=COLORS["text_bright"],
-            command=self._on_model_change,
-        ).pack(side="left", padx=4)
-
-        ctk.CTkLabel(bar, text="│",
-                     text_color=COLORS["border_bright"]).pack(side="left", padx=10)
-
-        # API key button
-        ctk.CTkButton(
-            bar, text="🔑 API KEY", width=100, height=30,
-            font=ctk.CTkFont(family="Courier New", size=9),
-            fg_color=COLORS["bg_card"],
-            hover_color=COLORS["border_bright"],
-            text_color=COLORS["text_normal"],
-            command=self._prompt_api_key,
-        ).pack(side="left", padx=4)
-
-        # Tick counter
-        self.tick_label = ctk.CTkLabel(bar,
-            text="TICK: 0000  SIM: --:--",
-            font=ctk.CTkFont(family="Courier New", size=10),
-            text_color=COLORS["text_dim"])
-        self.tick_label.pack(side="right", padx=16)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    #  TAG CONFIG  (shared across all textboxes)
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _configure_text_tags(self, widget: ctk.CTkTextbox):
-        tb = widget._textbox
-        tb.tag_configure("header",    foreground=COLORS["cyan"])
-        tb.tag_configure("critical",  foreground=COLORS["red"])
-        tb.tag_configure("high",      foreground=COLORS["orange"])
-        tb.tag_configure("moderate",  foreground=COLORS["yellow"])
-        tb.tag_configure("low",       foreground=COLORS["green"])
-        tb.tag_configure("dim",       foreground=COLORS["text_dim"])
-        tb.tag_configure("label",     foreground=COLORS["text_normal"])
-        tb.tag_configure("value",     foreground=COLORS["text_bright"])
-        tb.tag_configure("action",    foreground=COLORS["cyan"])
-        tb.tag_configure("reasoning", foreground=COLORS["text_normal"])
-        tb.tag_configure("event",     foreground=COLORS["blue"])
-        tb.tag_configure("timestamp", foreground=COLORS["text_dim"])
-        tb.tag_configure("node",      foreground=COLORS["cyan"])
-        tb.tag_configure("purple",    foreground=COLORS["purple"])
-
-    # ─────────────────────────────────────────────────────────────────────────
-    #  CONTROL HANDLERS
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _toggle_simulation(self):
-        if not self._sim_active:
-            self._sim_active = True
-            self.engine.start()
-            self.play_btn.configure(text="⏸  PAUSE",
-                                    fg_color=COLORS["orange"],
-                                    hover_color=COLORS["yellow"],
-                                    text_color=COLORS["bg_dark"])
-            self.status_dot.configure(text="● ONLINE", text_color=COLORS["green"])
-        else:
-            if self.engine._paused:
-                self.engine.resume()
-                self.play_btn.configure(text="⏸  PAUSE",
-                                        fg_color=COLORS["orange"],
-                                        hover_color=COLORS["yellow"],
-                                        text_color=COLORS["bg_dark"])
-            else:
-                self.engine.pause()
-                self.play_btn.configure(text="▶  RESUME",
-                                        fg_color=COLORS["green_dim"],
-                                        hover_color=COLORS["green"],
-                                        text_color=COLORS["bg_dark"])
-
-    def _on_speed_change(self, value):
-        val = int(value)
-        self.engine.set_speed(val)
-        self.speed_label.configure(text=f"{val}s/tick")
-
-    def _on_model_change(self, value):
-        self.engine.model_name = value
-        self._append(self.ai_text,
-                     f"\n  ↻ Model switched to: {value}\n", "event")
-
-    def _prompt_api_key(self):
-        """Open the API key dialog, then save the key to the engine."""
-        dlg = APIKeyDialog(self)
-        self.wait_window(dlg)
-        if dlg.api_key:
-            self.engine.api_key = dlg.api_key
-            self._append(self.ai_text,
-                         "  ✓ API key saved — OpenRouter connection active.\n", "low")
-        self._refresh_key_status()
-
-    def _refresh_key_status(self):
-        if self.engine.api_key:
-            masked = self.engine.api_key[:8] + "…" + self.engine.api_key[-4:]
-            self.key_status_label.configure(
-                text=f"🔑 {masked}", text_color=COLORS["green"])
-        else:
-            self.key_status_label.configure(
-                text="🔑 NO KEY", text_color=COLORS["yellow"])
-
-    # ─────────────────────────────────────────────────────────────────────────
-    #  QUEUE POLLING
-    # ─────────────────────────────────────────────────────────────────────────
+        bar_w, bar_h = 50, 6
+        c.create_rectangle(cx-bar_w//2, cy+55, cx+bar_w//2, cy+55+bar_h, fill=COLORS["bg_terminal"], outline="")
+        filled = int(bar_w * node.bloom_level)
+        if filled > 0:
+            c.create_rectangle(cx-bar_w//2, cy+55, cx-bar_w//2+filled, cy+55+bar_h, fill=color, outline="")
 
     def _poll_queues(self):
         processed = 0
@@ -1145,46 +798,38 @@ class SANADashboard(ctk.CTk):
         widget.configure(state="disabled")
 
     def _render_telemetry(self, payload: dict):
-        node    = payload["node_id"]
-        ts      = payload["timestamp"]
-        sev     = payload["severity"]
-        bloom   = payload["bloom_level"]
-        aer     = "⚡AER " if payload.get("aeration_active") else ""
-        sev_tag = sev.lower()
+        node     = payload["node_id"]
+        ts       = payload["timestamp"]
+        sev      = payload["severity"]
+        bloom    = payload["bloom_level"]
+        sev_tag  = sev.lower()
 
-        self._append(self.telem_text, f"\n{'─'*52}\n", "dim")
-        self._append(self.telem_text, f"  ↗ {node}  @{ts}  {aer}", "header")
-        self._append(self.telem_text, f"[{sev}]", sev_tag)
-        self._append(self.telem_text, f"  bloom={bloom:.2f}\n", "dim")
+        self._append(self.telem_text, f"\\n{'─'*52}\\n", "dim")
+        self._append(self.telem_text, f"  ↗ {node}  @{ts}", "header")
+        self._append(self.telem_text, f"  [{sev}]\\n", sev_tag)
 
-        idx  = payload["indices"]
+        idx = payload["indices"]
         rows = [
-            ("NDVI",     idx["NDVI"]["value"],       "",       idx["NDVI"]["status"]),
-            ("SABI",     idx["SABI"]["value"],       "",       idx["SABI"]["status"]),
-            ("NDWI",     idx["NDWI"]["value"],       "",       idx["NDWI"]["status"]),
-            ("CHL-a",    idx["CHL-a"]["value"],      "μg/L",   idx["CHL-a"]["status"]),
-            ("TURBIDITY",idx["Turbidity"]["value"],  "NTU",    idx["Turbidity"]["status"]),
-            ("SECCHI",   idx["Secchi"]["value"],     "m",      ""),
-            ("COVERAGE", idx["Coverage"]["value"],   "%",      ""),
-            ("CYANO",    idx["CYANO-PROXY"]["value"],"risk%",  idx["CYANO-PROXY"]["status"]),
+            ("EXG",      f"{idx['EXG']['value']:.3f}"),
+            ("GLI",      f"{idx['GLI']['value']:.3f}"),
+            ("BLOOM",    f"{idx['BLOOM']['value']:.3f}"),
+            ("HEALTH",   f"{payload['health']:.1f}%"),
+            ("TREND",    payload["trend"]),
         ]
 
-        for label, value, unit, status in rows:
-            v_str = f"{value:>7.2f} {unit:<5}"
-            if label == "CHL-a":
-                v_tag = "critical" if value>=50 else "high" if value>=25 else "moderate" if value>=10 else "low"
-            elif label == "CYANO":
-                v_tag = "critical" if value>=80 else "high" if value>=50 else "moderate" if value>=20 else "low"
-            elif label == "SABI":
-                v_tag = "critical" if value>=0.7 else "high" if value>=0.45 else "moderate" if value>=0.2 else "low"
+        for label, value in rows:
+            if label == "BLOOM":
+                v_tag = "critical" if idx['BLOOM']['value']>=0.8 else "high" if idx['BLOOM']['value']>=0.5 else "low"
+            elif label == "HEALTH":
+                v_tag = "critical" if payload['health']<=20 else "low"
             else:
                 v_tag = "value"
 
             self._append(self.telem_text, f"    {label:<12}", "label")
-            self._append(self.telem_text, v_str, v_tag)
-            if status:
-                self._append(self.telem_text, f"  {status}", "dim")
-            self._append(self.telem_text, "\n")
+            self._append(self.telem_text, f"{value}\\n", v_tag)
+        
+        self._append(self.telem_text, f"\\n    RAW: ", "dim")
+        self._append(self.telem_text, f"{payload['raw']}\\n", "dim")
 
     def _render_ai_result(self, item: dict):
         node    = item["node_id"]
