@@ -3,3 +3,5 @@ ollama
 requests
 python-dotenv
 spidev
+opencv-python
+Pillow
